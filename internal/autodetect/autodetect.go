@@ -12,18 +12,44 @@ import (
 )
 
 type BuildConfig struct {
-	IsAutoBuild       bool   `json:"isAutoBuild"`
-	Runtime           string `json:"runtime"`
-	Version           string `json:"version"`
-	PrebuildCommand   string `json:"prebuildCommand"`
-	BuildCommand      string `json:"buildCommand"`
-	RunCommand        string `json:"runCommand"`
-	DockerfileContent []byte `json:"dockerfileContent"`
+	IsAutoBuild        bool     `json:"isAutoBuild"`
+	Runtime            string   `json:"runtime"`
+	Framework          string   `json:"framework,omitempty"`
+	Version            string   `json:"version"`
+	InstallCommand     string   `json:"installCommand,omitempty"`
+	PrebuildCommand    string   `json:"prebuildCommand"`
+	SetupCommands      []string `json:"setupCommands,omitempty"`
+	BuildCommand       string   `json:"buildCommand"`
+	PostBuildCommands  []string `json:"postBuildCommands,omitempty"`
+	RunCommand         string   `json:"runCommand"`
+	RuntimeInitCommand string   `json:"runtimeInitCommand,omitempty"`
+	ExposePort         string   `json:"exposePort,omitempty"`
+	BuildContextDir    string   `json:"buildContextDir,omitempty"`
+	AppDir             string   `json:"appDir,omitempty"`
+	ValidationWarnings []string `json:"validationWarnings,omitempty"`
+	DockerfileContent  []byte   `json:"dockerfileContent"`
 }
 
 type nodePackageJSON struct {
-	Scripts        map[string]string `json:"scripts"`
-	PackageManager string            `json:"packageManager"`
+	Scripts         map[string]string `json:"scripts"`
+	PackageManager  string            `json:"packageManager"`
+	Dependencies    map[string]string `json:"dependencies"`
+	DevDependencies map[string]string `json:"devDependencies"`
+	Workspaces      interface{}       `json:"workspaces"`
+}
+
+type AutoDetectOptions struct {
+	RepoRoot   string
+	WorkingDir string
+}
+
+func (c *BuildConfig) NormalizePhaseAliases() {
+	if strings.TrimSpace(c.InstallCommand) == "" {
+		c.InstallCommand = strings.TrimSpace(c.PrebuildCommand)
+	}
+	if strings.TrimSpace(c.PrebuildCommand) == "" {
+		c.PrebuildCommand = strings.TrimSpace(c.InstallCommand)
+	}
 }
 
 func DetectRuntime(repoPath string) (string, string) {
@@ -40,7 +66,7 @@ func DetectRuntime(repoPath string) (string, string) {
 		return "go", "1.18" // Simplified version detection
 	}
 	if fileExists(filepath.Join(repoPath, "composer.json")) {
-		return "php", "8"
+		return "php", "8.3"
 	}
 	if fileExists(filepath.Join(repoPath, "pom.xml")) || fileExists(filepath.Join(repoPath, "build.gradle")) || fileExists(filepath.Join(repoPath, "build.gradle.kts")) {
 		return "java", "17"
@@ -69,6 +95,8 @@ func detectCommandsWithPath(repoPath string, runtime string, allowed *allowlist.
 		return detectPythonCommands(repoPath, allowed)
 	case "go":
 		return detectGoCommands(repoPath, allowed)
+	case "php":
+		return detectPHPCommands(repoPath, allowed)
 	case "java":
 		return detectJavaCommands(repoPath, allowed)
 	}
@@ -566,7 +594,7 @@ func detectNodeCommands(repoPath string, allowed *allowlist.AllowedCommands) (st
 
 	prebuildCandidates := nodePrebuildCandidates(repoPath, packageManager)
 	buildCandidates := nodeBuildCandidates(packageManager, scripts)
-	runCandidates := nodeRunCandidates(packageManager, scripts)
+	runCandidates := nodeRunCandidates(repoPath, packageManager, scripts)
 
 	return pickFirstAllowed(prebuildCandidates, allowed.Prebuild),
 		pickFirstAllowed(buildCandidates, allowed.Build),
@@ -662,7 +690,7 @@ func nodeBuildCandidates(packageManager string, scripts map[string]string) []str
 	return candidates
 }
 
-func nodeRunCandidates(packageManager string, scripts map[string]string) []string {
+func nodeRunCandidates(repoPath, packageManager string, scripts map[string]string) []string {
 	candidates := make([]string, 0, 10)
 	addedScripts := make(map[string]struct{})
 
@@ -677,13 +705,16 @@ func nodeRunCandidates(packageManager string, scripts map[string]string) []strin
 		candidates = append(candidates, nodeScriptCandidates(packageManager, name)...)
 	}
 
-	for _, name := range []string{"start", "serve", "preview", "dev"} {
+	for _, name := range []string{"start", "serve"} {
 		addScript(name)
 	}
 
 	for _, name := range sortedScriptNames(scripts) {
 		lowerName := strings.ToLower(name)
-		if strings.Contains(lowerName, "start") || strings.Contains(lowerName, "serve") || strings.Contains(lowerName, "prod") || strings.Contains(lowerName, "preview") {
+		if strings.Contains(lowerName, "dev") || strings.Contains(lowerName, "preview") {
+			continue
+		}
+		if strings.Contains(lowerName, "start") || strings.Contains(lowerName, "serve") || strings.Contains(lowerName, "prod") {
 			addScript(name)
 		}
 	}
@@ -698,7 +729,9 @@ func nodeRunCandidates(packageManager string, scripts map[string]string) []strin
 		}
 	}
 
-	candidates = append(candidates, "node server.js")
+	if repoPath != "" && fileExists(filepath.Join(repoPath, "server.js")) {
+		candidates = append(candidates, "node server.js")
+	}
 	return candidates
 }
 
@@ -821,28 +854,34 @@ func pickFirstAllowed(candidates []string, allowed []string) string {
 }
 
 func AutoDetectBuildConfig(repoPath string, allowed *allowlist.AllowedCommands) (BuildConfig, error) {
-	runtime, version := DetectRuntime(repoPath)
-	prebuild, build, run := detectCommandsWithPath(repoPath, runtime, allowed)
+	return AutoDetectBuildConfigWithEnvOptions(AutoDetectOptions{RepoRoot: repoPath}, allowed, nil, nil)
+}
 
-	dockerfileContent, err := GenerateDockerfile(runtime, version, prebuild, build, run)
+func AutoDetectBuildConfigWithOptions(opts AutoDetectOptions, allowed *allowlist.AllowedCommands) (BuildConfig, error) {
+	return AutoDetectBuildConfigWithEnvOptions(opts, allowed, nil, nil)
+}
+
+func AutoDetectBuildConfigWithEnvOptions(opts AutoDetectOptions, allowed *allowlist.AllowedCommands, buildArgKeys, secretBuildKeys []string) (BuildConfig, error) {
+	plan, err := detectBuildPlan(opts, allowed)
 	if err != nil {
 		return BuildConfig{}, err
 	}
-
-	return BuildConfig{
-		IsAutoBuild:       true,
-		Runtime:           runtime,
-		Version:           version,
-		PrebuildCommand:   prebuild,
-		BuildCommand:      build,
-		RunCommand:        run,
-		DockerfileContent: dockerfileContent,
-	}, nil
+	return buildConfigFromPlan(plan, true, buildArgKeys, secretBuildKeys)
 }
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
 }
 
 func isPythonProject(repoPath string) bool {

@@ -34,9 +34,9 @@ To prevent arbitrary command execution, only commands listed in this file are pe
 
 ```json
 {
-  "prebuild": ["npm install", "npm ci", "yarn install", "pnpm install", "bun install", "go work sync", "go mod download", "pip install -r requirements.txt", "pip install pipenv && pipenv install --system --deploy", "pip install .", "mvn clean", "gradle dependencies"],
-  "build": ["npm run build", "npm run build:*", "yarn build", "yarn run build:*", "pnpm run build", "pnpm run build:*", "go build -o app .", "go build -o app ./cmd/*", "go build -o app ./*", "go build ./...", "bun run build", "mvn install -DskipTests", "gradle build -x test"],
-  "run": ["npm start", "npm run *", "yarn start", "yarn run *", "pnpm start", "pnpm run *", "bun run start", "./app", "go run .", "go run ./cmd/*", "go run ./*", "python *.py", "python -m *", "python manage.py runserver 0.0.0.0:${PORT:-8000}", "uvicorn *:* --host 0.0.0.0 --port ${PORT:-8000}", "gunicorn *:* --bind 0.0.0.0:${PORT:-8000}", "java -jar target/*.jar", "java -jar build/libs/*.jar"]
+  "prebuild": ["npm install", "npm ci", "yarn install", "pnpm install", "bun install", "go work sync", "go mod download", "pip install -r requirements.txt", "pip install pipenv && pipenv install --system --deploy", "pip install .", "composer install", "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction", "mvn clean", "gradle dependencies"],
+  "build": ["npm run build", "npm run build:*", "yarn build", "yarn run build:*", "pnpm run build", "pnpm run build:*", "go build -o app .", "go build -o app ./cmd/*", "go build -o app ./*", "go build ./...", "bun run build", "composer dump-autoload --optimize", "php artisan optimize", "php bin/console cache:clear --env=prod --no-debug", "mvn install -DskipTests", "gradle build -x test"],
+  "run": ["npm start", "npm run *", "yarn start", "yarn run *", "pnpm start", "pnpm run *", "bun run start", "./app", "go run .", "go run ./cmd/*", "go run ./*", "python *.py", "python -m *", "python manage.py runserver 0.0.0.0:${PORT:-8000}", "uvicorn *:* --host 0.0.0.0 --port ${PORT:-8000}", "gunicorn *:* --bind 0.0.0.0:${PORT:-8000}", "apache2-foreground", "php-fpm -D && exec nginx -g 'daemon off;'", "php *.php", "java -jar target/*.jar", "java -jar build/libs/*.jar"]
 }
 ```
 
@@ -54,7 +54,7 @@ When `isAutoBuild` is set to `true`, the builder inspects the repository root (o
 | **Python** | `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` | `python:3.9-slim` |
 | **Java** | `pom.xml`, `build.gradle`, `build.gradle.kts` | `maven:3.9-eclipse-temurin-17` / `gradle:8-jdk17` |
 | **Static** | `index.html` | `nginx:alpine` |
-| **PHP** | `composer.json` | *Detected (Detection only)* |
+| **PHP** | `composer.json` | `php:8.3-apache` / `php:8.3-fpm` / `php:8.3-cli` |
 
 If a `Dockerfile` exists in the context, it takes precedence over auto-detection.
 

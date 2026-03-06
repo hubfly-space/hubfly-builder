@@ -21,6 +21,12 @@ func touchFile(t *testing.T, dir, name string) {
 func writePackageJSON(t *testing.T, dir string, scripts map[string]string, packageManager string) {
 	t.Helper()
 
+	writePackageJSONWithFields(t, dir, scripts, packageManager, nil, nil, nil)
+}
+
+func writePackageJSONWithFields(t *testing.T, dir string, scripts map[string]string, packageManager string, dependencies, devDependencies map[string]string, workspaces interface{}) {
+	t.Helper()
+
 	payload := map[string]interface{}{
 		"name": "sample-app",
 	}
@@ -30,6 +36,15 @@ func writePackageJSON(t *testing.T, dir string, scripts map[string]string, packa
 	if packageManager != "" {
 		payload["packageManager"] = packageManager
 	}
+	if len(dependencies) > 0 {
+		payload["dependencies"] = dependencies
+	}
+	if len(devDependencies) > 0 {
+		payload["devDependencies"] = devDependencies
+	}
+	if workspaces != nil {
+		payload["workspaces"] = workspaces
+	}
 
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -37,6 +52,25 @@ func writePackageJSON(t *testing.T, dir string, scripts map[string]string, packa
 	}
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), data, 0o644); err != nil {
 		t.Fatalf("failed to write package.json: %v", err)
+	}
+}
+
+func writeComposerJSON(t *testing.T, dir string, require map[string]string) {
+	t.Helper()
+
+	payload := map[string]interface{}{
+		"name": "sample/php-app",
+	}
+	if len(require) > 0 {
+		payload["require"] = require
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("failed to marshal composer.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "composer.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write composer.json: %v", err)
 	}
 }
 
@@ -163,6 +197,27 @@ func goAllowedCommands() *allowlist.AllowedCommands {
 	}
 }
 
+func phpAllowedCommands() *allowlist.AllowedCommands {
+	return &allowlist.AllowedCommands{
+		Prebuild: []string{
+			"composer install",
+			"composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
+		},
+		Build: []string{
+			"composer dump-autoload --optimize",
+			"php artisan optimize",
+			"php bin/console cache:clear --env=prod --no-debug",
+		},
+		Run: []string{
+			"apache2-foreground",
+			"php-fpm -D && exec nginx -g 'daemon off;'",
+			"php *.php",
+			"php artisan queue:work",
+			"php bin/console messenger:consume async",
+		},
+	}
+}
+
 func TestAutoDetectBuildConfigJavaMaven(t *testing.T) {
 	repo := t.TempDir()
 	touchFile(t, repo, "pom.xml")
@@ -282,6 +337,7 @@ func TestAutoDetectBuildConfigNodePnpmServeNoBuild(t *testing.T) {
 func TestAutoDetectBuildConfigNodeFallbackToServerJS(t *testing.T) {
 	repo := t.TempDir()
 	writePackageJSON(t, repo, nil, "")
+	touchFile(t, repo, "server.js")
 
 	cfg, err := AutoDetectBuildConfig(repo, nodeAllowedCommands())
 	if err != nil {
@@ -296,6 +352,17 @@ func TestAutoDetectBuildConfigNodeFallbackToServerJS(t *testing.T) {
 	}
 	if cfg.RunCommand != "node server.js" {
 		t.Fatalf("expected node server.js command, got %q", cfg.RunCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigNodeWithoutProductionRunCommandFails(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSON(t, repo, map[string]string{
+		"dev": "vite dev",
+	}, "")
+
+	if _, err := AutoDetectBuildConfig(repo, nodeAllowedCommands()); err == nil {
+		t.Fatalf("expected AutoDetectBuildConfig to fail without a production run command")
 	}
 }
 
@@ -319,6 +386,218 @@ func TestAutoDetectBuildConfigNodeCustomStartScript(t *testing.T) {
 	}
 	if cfg.RunCommand != "npm run start:prod" {
 		t.Fatalf("expected npm run start:prod command, got %q", cfg.RunCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigViteUsesStaticRuntime(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build":   "vite build",
+		"preview": "vite preview",
+	}, "", map[string]string{
+		"react": "18.0.0",
+	}, map[string]string{
+		"vite": "5.0.0",
+	}, nil)
+	touchFile(t, repo, "package-lock.json")
+	touchFile(t, repo, "vite.config.ts")
+
+	cfg, err := AutoDetectBuildConfig(repo, nodeAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Runtime != "static" {
+		t.Fatalf("expected static runtime, got %q", cfg.Runtime)
+	}
+	if cfg.Framework != "vite" {
+		t.Fatalf("expected vite framework, got %q", cfg.Framework)
+	}
+	if cfg.BuildCommand != "npm run build" {
+		t.Fatalf("expected npm run build command, got %q", cfg.BuildCommand)
+	}
+	if cfg.RunCommand != "" {
+		t.Fatalf("expected empty run command for static runtime, got %q", cfg.RunCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM node:22-bookworm-slim AS builder") {
+		t.Fatalf("expected builder stage in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "FROM nginx:alpine") {
+		t.Fatalf("expected nginx runtime stage in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY --from=builder /app/dist/ ./") {
+		t.Fatalf("expected dist copy in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "listen ${PORT};") {
+		t.Fatalf("expected dynamic PORT nginx template, got:\n%s", dockerfile)
+	}
+}
+
+func TestAutoDetectBuildConfigNodePrismaAddsGenerateAndRuntimeInit(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build": "tsc -p .",
+		"start": "node dist/server.js",
+	}, "", map[string]string{
+		"@prisma/client": "5.0.0",
+	}, map[string]string{
+		"prisma": "5.0.0",
+	}, nil)
+	touchFile(t, repo, "package-lock.json")
+	if err := os.MkdirAll(filepath.Join(repo, "prisma"), 0o755); err != nil {
+		t.Fatalf("failed to create prisma dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "prisma", "schema.prisma"), []byte("datasource db { provider = \"sqlite\" url = \"file:dev.db\" }\n"), 0o644); err != nil {
+		t.Fatalf("failed to write schema.prisma: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, nodeAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	foundGenerate := false
+	for _, command := range cfg.SetupCommands {
+		if command == "npx prisma generate" {
+			foundGenerate = true
+			break
+		}
+	}
+	if !foundGenerate {
+		t.Fatalf("expected prisma generate setup command, got %#v", cfg.SetupCommands)
+	}
+	if !strings.Contains(cfg.RuntimeInitCommand, "PRISMA_RUN_MIGRATIONS") {
+		t.Fatalf("expected Prisma runtime init command, got %q", cfg.RuntimeInitCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "RUN npx prisma generate") {
+		t.Fatalf("expected prisma generate RUN line, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "PRISMA_RUN_MIGRATIONS") {
+		t.Fatalf("expected Prisma runtime init in Dockerfile, got:\n%s", dockerfile)
+	}
+}
+
+func TestAutoDetectBuildConfigNextInfersPortFromScript(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build": "next build",
+		"start": "next start --port 4100",
+	}, "", map[string]string{
+		"next":  "15.0.0",
+		"react": "19.0.0",
+	}, nil, nil)
+	touchFile(t, repo, "package-lock.json")
+
+	cfg, err := AutoDetectBuildConfig(repo, nodeAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.ExposePort != "4100" {
+		t.Fatalf("expected inferred expose port 4100, got %q", cfg.ExposePort)
+	}
+	if !strings.Contains(cfg.RunCommand, "${PORT:-4100}") {
+		t.Fatalf("expected run command to use inferred port, got %q", cfg.RunCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigNextInstallsSharpWhenMissing(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build": "next build",
+		"start": "next start",
+	}, "", map[string]string{
+		"next":      "15.0.0",
+		"react":     "19.0.0",
+		"react-dom": "19.0.0",
+	}, nil, nil)
+	touchFile(t, repo, "package-lock.json")
+
+	cfg, err := AutoDetectBuildConfig(repo, nodeAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	foundSharp := false
+	for _, command := range cfg.SetupCommands {
+		if command == "npm install sharp" {
+			foundSharp = true
+			break
+		}
+	}
+	if !foundSharp {
+		t.Fatalf("expected sharp install setup command, got %#v", cfg.SetupCommands)
+	}
+	foundWarning := false
+	for _, warning := range cfg.ValidationWarnings {
+		if warning == "Next.js app does not declare sharp; builder will install it for production image optimization" {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected Next.js sharp warning, got %#v", cfg.ValidationWarnings)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "RUN npm install sharp") {
+		t.Fatalf("expected Dockerfile to install sharp, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "apt-get install -y --no-install-recommends") {
+		t.Fatalf("expected Dockerfile to install native packages, got:\n%s", dockerfile)
+	}
+}
+
+func TestAutoDetectBuildConfigWorkspaceUsesRootBuildContext(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, nil, "pnpm@9.0.0", nil, nil, []string{"apps/*"})
+	touchFile(t, repo, "pnpm-lock.yaml")
+	touchFile(t, repo, "pnpm-workspace.yaml")
+
+	appDir := filepath.Join(repo, "apps", "web")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatalf("failed to create app dir: %v", err)
+	}
+	writePackageJSONWithFields(t, appDir, map[string]string{
+		"build":   "vite build",
+		"preview": "vite preview",
+	}, "", map[string]string{
+		"react": "18.0.0",
+	}, map[string]string{
+		"vite": "5.0.0",
+	}, nil)
+	touchFile(t, appDir, "vite.config.ts")
+
+	cfg, err := AutoDetectBuildConfigWithOptions(AutoDetectOptions{
+		RepoRoot:   repo,
+		WorkingDir: "apps/web",
+	}, nodeAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfigWithOptions returned error: %v", err)
+	}
+
+	if cfg.BuildContextDir != "." {
+		t.Fatalf("expected root build context, got %q", cfg.BuildContextDir)
+	}
+	if cfg.AppDir != "apps/web" {
+		t.Fatalf("expected app dir apps/web, got %q", cfg.AppDir)
+	}
+	if cfg.PrebuildCommand != "pnpm install --frozen-lockfile" {
+		t.Fatalf("expected frozen pnpm install, got %q", cfg.PrebuildCommand)
+	}
+	if cfg.BuildCommand != "cd 'apps/web' && pnpm run build" {
+		t.Fatalf("expected build command to run in app dir, got %q", cfg.BuildCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "RUN corepack enable") {
+		t.Fatalf("expected corepack enable in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN corepack prepare pnpm@9.0.0 --activate") {
+		t.Fatalf("expected corepack prepare in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY --from=builder /app/apps/web/dist/ ./") {
+		t.Fatalf("expected workspace dist copy in Dockerfile, got:\n%s", dockerfile)
 	}
 }
 
@@ -438,6 +717,38 @@ func TestAutoDetectBuildConfigPythonASGI(t *testing.T) {
 
 	if cfg.RunCommand != "uvicorn asgi:application --host 0.0.0.0 --port ${PORT:-8000}" {
 		t.Fatalf("expected uvicorn asgi command, got %q", cfg.RunCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigPythonPlaywrightAddsSystemDeps(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "requirements.txt"), []byte("playwright==1.44.0\n"), 0o644); err != nil {
+		t.Fatalf("failed to write requirements.txt: %v", err)
+	}
+	touchFile(t, repo, "app.py")
+
+	cfg, err := AutoDetectBuildConfig(repo, pythonAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	found := false
+	for _, command := range cfg.SetupCommands {
+		if command == "python -m playwright install chromium" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected playwright browser install command, got %#v", cfg.SetupCommands)
+	}
+
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "apt-get install -y --no-install-recommends") {
+		t.Fatalf("expected apt install line in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN python -m playwright install chromium") {
+		t.Fatalf("expected playwright install RUN line, got:\n%s", dockerfile)
 	}
 }
 
@@ -571,5 +882,403 @@ func main() {}
 
 	if cfg.PrebuildCommand != "go work sync" {
 		t.Fatalf("expected go work sync prebuild command, got %q", cfg.PrebuildCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigPHPLaravelUsesApacheRuntime(t *testing.T) {
+	repo := t.TempDir()
+	writeComposerJSON(t, repo, map[string]string{
+		"laravel/framework": "^11.0",
+		"ext-intl":          "*",
+		"ext-pdo_mysql":     "*",
+	})
+	touchFile(t, repo, "composer.lock")
+	touchFile(t, repo, "artisan")
+	if err := os.MkdirAll(filepath.Join(repo, "public"), 0o755); err != nil {
+		t.Fatalf("failed to create public dir: %v", err)
+	}
+	touchFile(t, filepath.Join(repo, "public"), "index.php")
+
+	cfg, err := AutoDetectBuildConfig(repo, phpAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Runtime != "php" {
+		t.Fatalf("expected runtime php, got %q", cfg.Runtime)
+	}
+	if cfg.Framework != "laravel" {
+		t.Fatalf("expected laravel framework, got %q", cfg.Framework)
+	}
+	if cfg.PrebuildCommand != "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction" {
+		t.Fatalf("expected composer install command, got %q", cfg.PrebuildCommand)
+	}
+	if cfg.BuildCommand != "php artisan optimize" {
+		t.Fatalf("expected laravel optimize command, got %q", cfg.BuildCommand)
+	}
+	if cfg.RunCommand != "apache2-foreground" {
+		t.Fatalf("expected apache runtime command, got %q", cfg.RunCommand)
+	}
+	if cfg.ExposePort != "8080" {
+		t.Fatalf("expected php expose port 8080, got %q", cfg.ExposePort)
+	}
+
+	dockerfile := string(cfg.DockerfileContent)
+	for _, snippet := range []string{
+		"FROM php:8.3-apache",
+		"COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer",
+		"RUN a2enmod rewrite",
+		"RUN docker-php-ext-install intl opcache pdo_mysql",
+		"s!/var/www/html!/app/public!g",
+		"exec apache2-foreground",
+	} {
+		if !strings.Contains(dockerfile, snippet) {
+			t.Fatalf("expected Dockerfile to contain %q, got:\n%s", snippet, dockerfile)
+		}
+	}
+}
+
+func TestAutoDetectBuildConfigPHPSymfonyBuildCommand(t *testing.T) {
+	repo := t.TempDir()
+	writeComposerJSON(t, repo, map[string]string{
+		"symfony/framework-bundle": "^7.0",
+		"ext-intl":                 "*",
+		"ext-zip":                  "*",
+	})
+	touchFile(t, repo, "composer.lock")
+	if err := os.MkdirAll(filepath.Join(repo, "bin"), 0o755); err != nil {
+		t.Fatalf("failed to create bin dir: %v", err)
+	}
+	touchFile(t, filepath.Join(repo, "bin"), "console")
+	if err := os.MkdirAll(filepath.Join(repo, "public"), 0o755); err != nil {
+		t.Fatalf("failed to create public dir: %v", err)
+	}
+	touchFile(t, filepath.Join(repo, "public"), "index.php")
+
+	cfg, err := AutoDetectBuildConfig(repo, phpAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Framework != "symfony" {
+		t.Fatalf("expected symfony framework, got %q", cfg.Framework)
+	}
+	if cfg.BuildCommand != "php bin/console cache:clear --env=prod --no-debug" {
+		t.Fatalf("expected symfony build command, got %q", cfg.BuildCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "RUN docker-php-ext-install intl opcache zip") {
+		t.Fatalf("expected php extensions in Dockerfile, got:\n%s", dockerfile)
+	}
+}
+
+func TestAutoDetectBuildConfigPHPCLIWorkerUsesCLIImage(t *testing.T) {
+	repo := t.TempDir()
+	writeComposerJSON(t, repo, map[string]string{
+		"symfony/console": "^7.0",
+	})
+	touchFile(t, repo, "composer.lock")
+	touchFile(t, repo, "worker.php")
+
+	cfg, err := AutoDetectBuildConfig(repo, phpAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.RunCommand != "php worker.php" {
+		t.Fatalf("expected php worker runtime command, got %q", cfg.RunCommand)
+	}
+	if cfg.ExposePort != "" {
+		t.Fatalf("expected no exposed port for php cli worker, got %q", cfg.ExposePort)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM php:8.3-cli") {
+		t.Fatalf("expected cli image in Dockerfile, got:\n%s", dockerfile)
+	}
+	if strings.Contains(dockerfile, "a2enmod rewrite") {
+		t.Fatalf("did not expect apache module enable in cli Dockerfile:\n%s", dockerfile)
+	}
+}
+
+func TestAutoDetectBuildConfigPHPFPMNginxModeAndPECL(t *testing.T) {
+	repo := t.TempDir()
+	writeComposerJSON(t, repo, map[string]string{
+		"laravel/framework": "^11.0",
+		"ext-imagick":       "*",
+		"ext-redis":         "*",
+	})
+	touchFile(t, repo, "composer.lock")
+	touchFile(t, repo, "artisan")
+	touchFile(t, repo, "nginx.conf")
+	if err := os.MkdirAll(filepath.Join(repo, "public"), 0o755); err != nil {
+		t.Fatalf("failed to create public dir: %v", err)
+	}
+	touchFile(t, filepath.Join(repo, "public"), "index.php")
+
+	cfg, err := AutoDetectBuildConfig(repo, phpAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.RunCommand != "php-fpm -D && exec nginx -g 'daemon off;'" {
+		t.Fatalf("expected php-fpm nginx run command, got %q", cfg.RunCommand)
+	}
+	if cfg.ExposePort != "8080" {
+		t.Fatalf("expected fpm expose port 8080, got %q", cfg.ExposePort)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	for _, snippet := range []string{
+		"FROM php:8.3-fpm",
+		"apt-get install -y --no-install-recommends $PHPIZE_DEPS git imagemagick libmagickwand-dev nginx unzip",
+		"RUN printf \"\\n\" | pecl install imagick",
+		"RUN printf \"\\n\" | pecl install redis",
+		"RUN docker-php-ext-enable imagick redis",
+		"/etc/nginx/templates/hubfly-default.conf.template",
+		"fastcgi_pass 127.0.0.1:9000;",
+	} {
+		if !strings.Contains(dockerfile, snippet) {
+			t.Fatalf("expected Dockerfile to contain %q, got:\n%s", snippet, dockerfile)
+		}
+	}
+}
+
+func TestFinalizeBuildConfigWithOptionsSupportsManualPHPFPMMode(t *testing.T) {
+	repo := t.TempDir()
+	writeComposerJSON(t, repo, map[string]string{
+		"symfony/framework-bundle": "^7.0",
+	})
+	touchFile(t, repo, "composer.lock")
+	if err := os.MkdirAll(filepath.Join(repo, "public"), 0o755); err != nil {
+		t.Fatalf("failed to create public dir: %v", err)
+	}
+	touchFile(t, filepath.Join(repo, "public"), "index.php")
+
+	cfg, err := FinalizeBuildConfigWithOptions(AutoDetectOptions{RepoRoot: repo}, BuildConfig{
+		Runtime:        "php",
+		Framework:      "symfony-nginx",
+		InstallCommand: "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
+		RunCommand:     "php-fpm -D && exec nginx -g 'daemon off;'",
+		ExposePort:     "9090",
+	}, phpAllowedCommands())
+	if err != nil {
+		t.Fatalf("FinalizeBuildConfigWithOptions returned error: %v", err)
+	}
+
+	if cfg.ExposePort != "9090" {
+		t.Fatalf("expected submitted expose port 9090, got %q", cfg.ExposePort)
+	}
+	if !strings.Contains(string(cfg.DockerfileContent), "FROM php:8.3-fpm") {
+		t.Fatalf("expected fpm image in Dockerfile, got:\n%s", string(cfg.DockerfileContent))
+	}
+	if !strings.Contains(cfg.RuntimeInitCommand, "${PORT:-9090}") {
+		t.Fatalf("expected fpm runtime init to honor custom port, got %q", cfg.RuntimeInitCommand)
+	}
+}
+
+func TestAuditDockerfileWarnsWhenPHPPecLExtensionsOrServerAreMissing(t *testing.T) {
+	repo := t.TempDir()
+	writeComposerJSON(t, repo, map[string]string{
+		"laravel/framework": "^11.0",
+		"ext-imagick":       "*",
+	})
+	if err := os.MkdirAll(filepath.Join(repo, "public"), 0o755); err != nil {
+		t.Fatalf("failed to create public dir: %v", err)
+	}
+	touchFile(t, filepath.Join(repo, "public"), "index.php")
+	dockerfile := `FROM php:8.3-fpm
+COPY . .
+RUN composer install
+CMD ["php-fpm"]
+`
+	if err := os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("failed to write Dockerfile: %v", err)
+	}
+
+	audit := AuditDockerfileWithOptions(AutoDetectOptions{RepoRoot: repo}, filepath.Join(repo, "Dockerfile"))
+	for _, expected := range []string{
+		"Dockerfile appears to run php-fpm for a web app without starting an HTTP server",
+		"PHP project requires ext-imagick but Dockerfile does not appear to enable it",
+		"PHP project requires ext-imagick but Dockerfile does not appear to install it via PECL",
+	} {
+		found := false
+		for _, warning := range audit.Warnings {
+			if warning == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected warning %q, got %#v", expected, audit.Warnings)
+		}
+	}
+}
+
+func TestAuditDockerfileRejectsVitePreviewWithoutHost(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build":   "vite build",
+		"preview": "vite preview",
+	}, "", map[string]string{
+		"react": "18.0.0",
+	}, map[string]string{
+		"vite": "5.0.0",
+	}, nil)
+	touchFile(t, repo, "vite.config.ts")
+	dockerfile := `FROM node:22-bookworm-slim
+CMD npm run preview
+`
+	if err := os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("failed to write Dockerfile: %v", err)
+	}
+
+	audit := AuditDockerfileWithOptions(AutoDetectOptions{RepoRoot: repo}, filepath.Join(repo, "Dockerfile"))
+	if len(audit.Errors) == 0 {
+		t.Fatalf("expected audit errors, got %#v", audit)
+	}
+}
+
+func TestAuditDockerfileWarnsWhenPythonPlaywrightInstallMissing(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "requirements.txt"), []byte("playwright==1.44.0\n"), 0o644); err != nil {
+		t.Fatalf("failed to write requirements.txt: %v", err)
+	}
+	touchFile(t, repo, "app.py")
+	dockerfile := `FROM python:3.11-slim
+COPY . .
+CMD ["python", "app.py"]
+`
+	if err := os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("failed to write Dockerfile: %v", err)
+	}
+
+	audit := AuditDockerfileWithOptions(AutoDetectOptions{RepoRoot: repo}, filepath.Join(repo, "Dockerfile"))
+	if len(audit.Warnings) == 0 {
+		t.Fatalf("expected audit warnings, got %#v", audit)
+	}
+}
+
+func TestAuditDockerfileWarnsWhenNextSharpMissing(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build": "next build",
+		"start": "next start",
+	}, "", map[string]string{
+		"next":      "15.0.0",
+		"react":     "19.0.0",
+		"react-dom": "19.0.0",
+	}, nil, nil)
+	dockerfile := `FROM node:22-bookworm-slim
+WORKDIR /app
+COPY . .
+RUN npm ci
+RUN npm run build
+CMD ["npm", "start"]
+`
+	if err := os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("failed to write Dockerfile: %v", err)
+	}
+
+	audit := AuditDockerfileWithOptions(AutoDetectOptions{RepoRoot: repo}, filepath.Join(repo, "Dockerfile"))
+	foundWarning := false
+	for _, warning := range audit.Warnings {
+		if warning == "Next.js app does not declare sharp, so production image optimization may use more memory unless the Dockerfile installs it" {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected Next.js sharp warning, got %#v", audit.Warnings)
+	}
+}
+
+func TestFinalizeBuildConfigWithOptionsSupportsStructuredNodePhases(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build":       "webpack",
+		"build:check": "node scripts/check-build.js",
+		"start":       "node dist/server.js",
+	}, "", map[string]string{
+		"@prisma/client": "5.0.0",
+	}, map[string]string{
+		"prisma": "5.0.0",
+	}, nil)
+	touchFile(t, repo, "package-lock.json")
+
+	cfg, err := FinalizeBuildConfigWithOptions(AutoDetectOptions{RepoRoot: repo}, BuildConfig{
+		Runtime:           "node",
+		PrebuildCommand:   "npm ci",
+		SetupCommands:     []string{"npx prisma generate"},
+		BuildCommand:      "npm run build",
+		PostBuildCommands: []string{"npm run build:check"},
+		RunCommand:        "npm start",
+	}, nodeAllowedCommands())
+	if err != nil {
+		t.Fatalf("FinalizeBuildConfigWithOptions returned error: %v", err)
+	}
+
+	if cfg.InstallCommand != "npm ci" {
+		t.Fatalf("expected install command alias to resolve to npm ci, got %q", cfg.InstallCommand)
+	}
+	if cfg.PrebuildCommand != "npm ci" {
+		t.Fatalf("expected legacy prebuild alias to remain npm ci, got %q", cfg.PrebuildCommand)
+	}
+	if len(cfg.PostBuildCommands) != 1 || cfg.PostBuildCommands[0] != "npm run build:check" {
+		t.Fatalf("expected post-build command, got %#v", cfg.PostBuildCommands)
+	}
+
+	dockerfile := string(cfg.DockerfileContent)
+	for _, snippet := range []string{
+		"RUN npm ci",
+		"RUN npx prisma generate",
+		"RUN npm run build",
+		"RUN npm run build:check",
+		"exec npm start",
+	} {
+		if !strings.Contains(dockerfile, snippet) {
+			t.Fatalf("expected Dockerfile to contain %q, got:\n%s", snippet, dockerfile)
+		}
+	}
+}
+
+func TestFinalizeBuildConfigWithOptionsForcesStaticFrontendRuntime(t *testing.T) {
+	repo := t.TempDir()
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build":   "vite build",
+		"preview": "vite preview",
+	}, "", map[string]string{
+		"react": "18.0.0",
+	}, map[string]string{
+		"vite": "5.0.0",
+	}, nil)
+	touchFile(t, repo, "package-lock.json")
+	touchFile(t, repo, "vite.config.ts")
+
+	cfg, err := FinalizeBuildConfigWithOptions(AutoDetectOptions{RepoRoot: repo}, BuildConfig{
+		Runtime:           "static",
+		InstallCommand:    "npm ci",
+		BuildCommand:      "npm run build",
+		RunCommand:        "npm run preview",
+		PostBuildCommands: []string{"npm run build"},
+	}, nodeAllowedCommands())
+	if err != nil {
+		t.Fatalf("FinalizeBuildConfigWithOptions returned error: %v", err)
+	}
+
+	if cfg.Runtime != "static" {
+		t.Fatalf("expected static runtime, got %q", cfg.Runtime)
+	}
+	if cfg.RunCommand != "" {
+		t.Fatalf("expected run command to be cleared for static runtime, got %q", cfg.RunCommand)
+	}
+	if len(cfg.ValidationWarnings) == 0 || !strings.Contains(cfg.ValidationWarnings[0], "ignoring submitted run command") {
+		t.Fatalf("expected static runtime warning, got %#v", cfg.ValidationWarnings)
+	}
+
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM nginx:alpine") {
+		t.Fatalf("expected nginx runtime in Dockerfile, got:\n%s", dockerfile)
+	}
+	if strings.Contains(dockerfile, "npm run preview") {
+		t.Fatalf("did not expect preview command in static Dockerfile:\n%s", dockerfile)
 	}
 }
