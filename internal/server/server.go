@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/mux"
 	"hubfly-builder/internal/allowlist"
 	"hubfly-builder/internal/autodetect"
+	"hubfly-builder/internal/envplan"
 	"hubfly-builder/internal/executor"
 	"hubfly-builder/internal/logs"
 	"hubfly-builder/internal/storage"
@@ -61,6 +62,7 @@ func (s *Server) CreateJobHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	job.BuildConfig.NormalizePhaseAliases()
 	if strings.TrimSpace(job.BuildConfig.Network) == "" {
 		http.Error(w, "no user network provided", http.StatusBadRequest)
 		return
@@ -99,31 +101,88 @@ func (s *Server) CreateJobHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		inspectDir := tempDir
-		if job.SourceInfo.WorkingDir != "" {
-			inspectDir = filepath.Join(tempDir, job.SourceInfo.WorkingDir)
-		}
-
-		detectedConfig, err := autodetect.AutoDetectBuildConfig(inspectDir, s.allowlist)
+		appDir, inspectDir, err := resolveWorkingDirectory(tempDir, job.SourceInfo.WorkingDir)
 		if err != nil {
-			http.Error(w, "failed to autodetect build config", http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		job.BuildConfig = storage.BuildConfig{
-			IsAutoBuild:       detectedConfig.IsAutoBuild,
-			Runtime:           detectedConfig.Runtime,
-			Version:           detectedConfig.Version,
-			PrebuildCommand:   detectedConfig.PrebuildCommand,
-			BuildCommand:      detectedConfig.BuildCommand,
-			RunCommand:        detectedConfig.RunCommand,
-			Network:           job.BuildConfig.Network,          // Keep incoming network target.
-			TimeoutSeconds:    job.BuildConfig.TimeoutSeconds,   // Keep original timeout
-			ResourceLimits:    job.BuildConfig.ResourceLimits,   // Keep original resource limits
-			Env:               job.BuildConfig.Env,              // Keep incoming env vars.
-			EnvOverrides:      job.BuildConfig.EnvOverrides,     // Keep incoming env override hints.
-			ResolvedEnvPlan:   job.BuildConfig.ResolvedEnvPlan,  // Keep any pre-resolved metadata.
-			DockerfileContent: detectedConfig.DockerfileContent,
+
+		dockerfilePath, buildContextDir := detectDockerfileLayout(tempDir, appDir)
+		if dockerfilePath != "" {
+			audit := autodetect.AuditDockerfileWithOptions(autodetect.AutoDetectOptions{
+				RepoRoot:   tempDir,
+				WorkingDir: appDir,
+			}, dockerfilePath)
+			if len(audit.Errors) > 0 {
+				http.Error(w, strings.Join(audit.Errors, "; "), http.StatusBadRequest)
+				return
+			}
+
+			dockerfileContent, readErr := os.ReadFile(dockerfilePath)
+			if readErr != nil {
+				http.Error(w, "failed to read Dockerfile", http.StatusInternalServerError)
+				return
+			}
+
+			runtime, version := autodetect.DetectRuntime(inspectDir)
+			job.BuildConfig = storage.BuildConfig{
+				IsAutoBuild:        true,
+				Runtime:            runtime,
+				Version:            version,
+				BuildContextDir:    buildContextDir,
+				AppDir:             appDir,
+				ValidationWarnings: audit.Warnings,
+				Network:            job.BuildConfig.Network,
+				TimeoutSeconds:     job.BuildConfig.TimeoutSeconds,
+				ResourceLimits:     job.BuildConfig.ResourceLimits,
+				Env:                job.BuildConfig.Env,
+				EnvOverrides:       job.BuildConfig.EnvOverrides,
+				ResolvedEnvPlan:    job.BuildConfig.ResolvedEnvPlan,
+				DockerfileContent:  dockerfileContent,
+			}
+		} else {
+			detectedConfig, err := autodetect.AutoDetectBuildConfigWithOptions(autodetect.AutoDetectOptions{
+				RepoRoot:   tempDir,
+				WorkingDir: appDir,
+			}, s.allowlist)
+			if err != nil {
+				http.Error(w, "failed to autodetect build config", http.StatusInternalServerError)
+				return
+			}
+			job.BuildConfig = storage.BuildConfig{
+				IsAutoBuild:        detectedConfig.IsAutoBuild,
+				Runtime:            detectedConfig.Runtime,
+				Framework:          detectedConfig.Framework,
+				Version:            detectedConfig.Version,
+				InstallCommand:     detectedConfig.InstallCommand,
+				PrebuildCommand:    detectedConfig.PrebuildCommand,
+				SetupCommands:      detectedConfig.SetupCommands,
+				BuildCommand:       detectedConfig.BuildCommand,
+				PostBuildCommands:  detectedConfig.PostBuildCommands,
+				RunCommand:         detectedConfig.RunCommand,
+				RuntimeInitCommand: detectedConfig.RuntimeInitCommand,
+				ExposePort:         detectedConfig.ExposePort,
+				BuildContextDir:    detectedConfig.BuildContextDir,
+				AppDir:             detectedConfig.AppDir,
+				ValidationWarnings: detectedConfig.ValidationWarnings,
+				Network:            job.BuildConfig.Network,
+				TimeoutSeconds:     job.BuildConfig.TimeoutSeconds,
+				ResourceLimits:     job.BuildConfig.ResourceLimits,
+				Env:                job.BuildConfig.Env,
+				EnvOverrides:       job.BuildConfig.EnvOverrides,
+				ResolvedEnvPlan:    job.BuildConfig.ResolvedEnvPlan,
+				DockerfileContent:  detectedConfig.DockerfileContent,
+			}
 		}
+
+		buildContextPath, err := resolveBuildContextPath(tempDir, job.BuildConfig.BuildContextDir)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		envResult := envplan.ResolveForPaths([]string{buildContextPath, inspectDir}, job.BuildConfig.Env, job.BuildConfig.EnvOverrides)
+		job.BuildConfig.ResolvedEnvPlan = envResult.Entries
+		job.BuildConfig.ValidationWarnings = mergeWarnings(job.BuildConfig.ValidationWarnings, envResult.Warnings)
 	}
 
 	if err := s.storage.CreateJob(&job); err != nil {
@@ -137,6 +196,71 @@ func (s *Server) CreateJobHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(job)
+}
+
+func resolveWorkingDirectory(repoRoot, workingDir string) (string, string, error) {
+	trimmed := strings.TrimSpace(workingDir)
+	if trimmed == "" || trimmed == "." {
+		return ".", repoRoot, nil
+	}
+
+	cleaned := filepath.Clean(trimmed)
+	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", "", fmt.Errorf("working directory must stay within the repository root")
+	}
+
+	return filepath.ToSlash(cleaned), filepath.Join(repoRoot, cleaned), nil
+}
+
+func detectDockerfileLayout(repoRoot, appDir string) (string, string) {
+	if appDir != "." {
+		appDockerfile := filepath.Join(repoRoot, filepath.FromSlash(appDir), "Dockerfile")
+		if info, err := os.Stat(appDockerfile); err == nil && info.Mode().IsRegular() {
+			return appDockerfile, appDir
+		}
+	}
+
+	rootDockerfile := filepath.Join(repoRoot, "Dockerfile")
+	if info, err := os.Stat(rootDockerfile); err == nil && info.Mode().IsRegular() {
+		return rootDockerfile, "."
+	}
+
+	return "", ""
+}
+
+func resolveBuildContextPath(repoRoot, buildContextDir string) (string, error) {
+	trimmed := strings.TrimSpace(buildContextDir)
+	if trimmed == "" || trimmed == "." {
+		return repoRoot, nil
+	}
+
+	cleaned := filepath.Clean(trimmed)
+	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("build context must stay within the repository root")
+	}
+
+	return filepath.Join(repoRoot, cleaned), nil
+}
+
+func mergeWarnings(primary []string, extras []string) []string {
+	if len(primary) == 0 && len(extras) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(primary)+len(extras))
+	merged := make([]string, 0, len(primary)+len(extras))
+	for _, value := range append(append([]string{}, primary...), extras...) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	return merged
 }
 
 func (s *Server) GetJobHandler(w http.ResponseWriter, r *http.Request) {

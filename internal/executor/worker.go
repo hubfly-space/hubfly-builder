@@ -51,6 +51,7 @@ func NewWorker(job *storage.BuildJob, storage *storage.Storage, logManager *logs
 
 func (w *Worker) Run() error {
 	log.Printf("Starting build for job %s", w.job.ID)
+	w.job.BuildConfig.NormalizePhaseAliases()
 	w.job.StartedAt = sql.NullTime{Time: time.Now(), Valid: true}
 
 	logPath, logFile, err := w.logManager.CreateLogFile(w.job.ID)
@@ -107,21 +108,72 @@ func (w *Worker) Run() error {
 
 	w.log("Repository cloned and checked out successfully.")
 
-	// Determine effective build context directory based on WorkingDir.
-	buildContext := w.workDir
-	if w.job.SourceInfo.WorkingDir != "" {
-		buildContext = filepath.Join(w.workDir, w.job.SourceInfo.WorkingDir)
-		w.log("Using working directory: %s", w.job.SourceInfo.WorkingDir)
+	appDir, appPath, err := resolveWorkspacePath(w.workDir, w.job.SourceInfo.WorkingDir)
+	if err != nil {
+		w.log("ERROR: invalid working directory %q: %v", w.job.SourceInfo.WorkingDir, err)
+		return w.failJob("invalid working directory")
+	}
+	if appDir != "." {
+		w.log("Using working directory: %s", appDir)
+	}
+
+	buildContextDir := appDir
+	buildContext := appPath
+	dockerfilePath, dockerfileContextDir := detectDockerfileLayout(w.workDir, appDir)
+	hasExistingDockerfile := dockerfilePath != ""
+	if dockerfilePath != "" {
+		buildContextDir = dockerfileContextDir
+		buildContext, err = resolveBuildContextPath(w.workDir, buildContextDir)
+		if err != nil {
+			w.log("ERROR: invalid build context %q: %v", buildContextDir, err)
+			return w.failJob("invalid build context")
+		}
+	}
+
+	var plannedConfig autodetect.BuildConfig
+	if dockerfilePath == "" {
+		switch {
+		case w.job.BuildConfig.IsAutoBuild:
+			plannedConfig, err = autodetect.AutoDetectBuildConfigWithOptions(autodetect.AutoDetectOptions{
+				RepoRoot:   w.workDir,
+				WorkingDir: appDir,
+			}, w.allowlist)
+			if err != nil {
+				w.log("ERROR: failed to auto-detect build config: %v", err)
+				return w.failJob("failed to auto-detect build config")
+			}
+		case hasStructuredBuildStrategy(w.job.BuildConfig):
+			plannedConfig, err = autodetect.FinalizeBuildConfigWithOptions(autodetect.AutoDetectOptions{
+				RepoRoot:   w.workDir,
+				WorkingDir: appDir,
+			}, toAutodetectBuildConfig(w.job.BuildConfig), w.allowlist)
+			if err != nil {
+				w.log("ERROR: failed to finalize submitted build config: %v", err)
+				return w.failJob("failed to finalize submitted build config")
+			}
+		}
+	}
+	if !hasExistingDockerfile && plannedConfig.BuildContextDir != "" {
+		buildContextDir = plannedConfig.BuildContextDir
+		buildContext, err = resolveBuildContextPath(w.workDir, buildContextDir)
+		if err != nil {
+			w.log("ERROR: invalid detected build context %q: %v", buildContextDir, err)
+			return w.failJob("invalid detected build context")
+		}
 	}
 
 	if len(w.job.BuildConfig.Env) == 0 && len(w.job.Env) > 0 {
 		w.job.BuildConfig.Env = copyStringMap(w.job.Env)
 	}
 
-	envResult := envplan.Resolve(buildContext, w.job.BuildConfig.Env, w.job.BuildConfig.EnvOverrides)
+	envResult := envplan.ResolveForPaths([]string{buildContext, appPath}, w.job.BuildConfig.Env, w.job.BuildConfig.EnvOverrides)
 	w.job.BuildConfig.ResolvedEnvPlan = envResult.Entries
+	w.job.BuildConfig.ValidationWarnings = mergeWarnings(w.job.BuildConfig.ValidationWarnings, envResult.Warnings)
 	w.logResolvedEnvPlan(envResult.Entries)
-	if len(w.job.BuildConfig.Env) > 0 {
+	for _, warning := range envResult.Warnings {
+		w.log("Env warning: %s", warning)
+	}
+	if len(w.job.BuildConfig.Env) > 0 || len(w.job.BuildConfig.ResolvedEnvPlan) > 0 || len(w.job.BuildConfig.ValidationWarnings) > 0 {
 		if err := w.storage.UpdateJobBuildConfig(w.job.ID, &w.job.BuildConfig); err != nil {
 			w.log("WARNING: could not persist resolved env plan: %v", err)
 		}
@@ -157,13 +209,34 @@ func (w *Worker) Run() error {
 	w.log("Ephemeral BuildKit ready: container=%s userNetwork=%s workerNet=host runNet=host addr=%s", ephemeralSession.ContainerName, ephemeralSession.UserNetwork, ephemeralSession.Addr)
 	activeBuildKit := driver.NewBuildKit(ephemeralSession.Addr)
 
-	dockerfilePath := filepath.Join(buildContext, "Dockerfile")
-	if _, err := os.Stat(dockerfilePath); err == nil {
+	if hasExistingDockerfile {
 		w.log("Dockerfile found in context, starting BuildKit build...")
 
-		// Warn if PrebuildCommand is ignored.
-		if w.job.BuildConfig.PrebuildCommand != "" {
-			w.log("WARNING: PrebuildCommand '%s' is ignored because a Dockerfile was provided. Please include pre-build steps in your Dockerfile.", w.job.BuildConfig.PrebuildCommand)
+		audit := autodetect.AuditDockerfileWithOptions(autodetect.AutoDetectOptions{
+			RepoRoot:   w.workDir,
+			WorkingDir: appDir,
+		}, dockerfilePath)
+		for _, warning := range audit.Warnings {
+			w.log("Dockerfile audit warning: %s", warning)
+		}
+		if len(audit.Errors) > 0 {
+			for _, auditErr := range audit.Errors {
+				w.log("Dockerfile audit error: %s", auditErr)
+			}
+			return w.failJob(strings.Join(audit.Errors, "; "))
+		}
+		w.job.BuildConfig.BuildContextDir = buildContextDir
+		w.job.BuildConfig.AppDir = appDir
+		w.job.BuildConfig.ValidationWarnings = mergeWarnings(w.job.BuildConfig.ValidationWarnings, audit.Warnings)
+		if content, readErr := os.ReadFile(dockerfilePath); readErr == nil {
+			w.job.BuildConfig.DockerfileContent = content
+		}
+		if err := w.storage.UpdateJobBuildConfig(w.job.ID, &w.job.BuildConfig); err != nil {
+			w.log("WARNING: could not persist Dockerfile audit metadata: %v", err)
+		}
+
+		if hasStructuredBuildStrategy(w.job.BuildConfig) {
+			w.log("WARNING: submitted install/setup/build/run phases are ignored because a Dockerfile was provided. Keep custom lifecycle steps in the Dockerfile itself.")
 		}
 
 		imageTag := w.generateImageTag()
@@ -189,49 +262,67 @@ func (w *Worker) Run() error {
 		}
 	} else {
 		w.log("No Dockerfile found in context, attempting to auto-detect and generate...")
-		if !w.job.BuildConfig.IsAutoBuild {
+		if !w.job.BuildConfig.IsAutoBuild && !hasStructuredBuildStrategy(w.job.BuildConfig) {
 			w.log("ERROR: Auto-build is not enabled for this job.")
 			return w.failJob("No build strategy found (e.g., Dockerfile missing and auto-build disabled)")
 		}
 
 		// Detect config and generate Dockerfile content.
-		detectedConfig, err := autodetect.AutoDetectBuildConfig(buildContext, w.allowlist)
-		if err != nil {
-			w.log("ERROR: failed to auto-detect build config: %v", err)
-			return w.failJob("failed to auto-detect build config")
+		var detectedConfig autodetect.BuildConfig
+		if w.job.BuildConfig.IsAutoBuild {
+			detectedConfig, err = autodetect.AutoDetectBuildConfigWithEnvOptions(autodetect.AutoDetectOptions{
+				RepoRoot:   w.workDir,
+				WorkingDir: appDir,
+			}, w.allowlist, envResult.BuildArgKeys(), envResult.BuildSecretKeys())
+			if err != nil {
+				w.log("ERROR: failed to auto-detect build config: %v", err)
+				return w.failJob("failed to auto-detect build config")
+			}
+		} else {
+			detectedConfig, err = autodetect.FinalizeBuildConfigWithEnvOptions(autodetect.AutoDetectOptions{
+				RepoRoot:   w.workDir,
+				WorkingDir: appDir,
+			}, toAutodetectBuildConfig(w.job.BuildConfig), w.allowlist, envResult.BuildArgKeys(), envResult.BuildSecretKeys())
+			if err != nil {
+				w.log("ERROR: failed to finalize submitted build config: %v", err)
+				return w.failJob("failed to finalize submitted build config")
+			}
 		}
+
+		buildContextDir = detectedConfig.BuildContextDir
+		buildContext, err = resolveBuildContextPath(w.workDir, buildContextDir)
+		if err != nil {
+			w.log("ERROR: invalid detected build context %q: %v", buildContextDir, err)
+			return w.failJob("invalid detected build context")
+		}
+		dockerfilePath = filepath.Join(buildContext, "Dockerfile")
 
 		w.log("Auto-detected runtime: %s, version: %s", detectedConfig.Runtime, detectedConfig.Version)
-		if detectedConfig.PrebuildCommand != "" {
-			w.log("Auto-detected pre-build command: %s", detectedConfig.PrebuildCommand)
+		if detectedConfig.Framework != "" {
+			w.log("Auto-detected framework: %s", detectedConfig.Framework)
+		}
+		if detectedConfig.InstallCommand != "" {
+			w.log("Resolved install command: %s", detectedConfig.InstallCommand)
+		}
+		for _, command := range detectedConfig.SetupCommands {
+			w.log("Resolved setup command: %s", command)
+		}
+		for _, command := range detectedConfig.PostBuildCommands {
+			w.log("Resolved post-build command: %s", command)
+		}
+		for _, warning := range detectedConfig.ValidationWarnings {
+			w.log("Resolved warning: %s", warning)
 		}
 
-		dockerfileContent, err := autodetect.GenerateDockerfileWithBuildEnv(
-			detectedConfig.Runtime,
-			detectedConfig.Version,
-			detectedConfig.PrebuildCommand,
-			detectedConfig.BuildCommand,
-			detectedConfig.RunCommand,
-			envResult.BuildArgKeys(),
-			envResult.BuildSecretKeys(),
-		)
-		if err != nil {
-			w.log("ERROR: failed to generate Dockerfile with env support: %v", err)
-			return w.failJob("failed to generate Dockerfile")
-		}
-
-		w.job.BuildConfig.Runtime = detectedConfig.Runtime
-		w.job.BuildConfig.Version = detectedConfig.Version
-		w.job.BuildConfig.PrebuildCommand = detectedConfig.PrebuildCommand
-		w.job.BuildConfig.BuildCommand = detectedConfig.BuildCommand
-		w.job.BuildConfig.RunCommand = detectedConfig.RunCommand
-		w.job.BuildConfig.DockerfileContent = dockerfileContent
+		applyDetectedBuildConfig(&w.job.BuildConfig, detectedConfig)
+		w.job.BuildConfig.ValidationWarnings = mergeWarnings(w.job.BuildConfig.ValidationWarnings, detectedConfig.ValidationWarnings)
+		w.job.BuildConfig.DockerfileContent = detectedConfig.DockerfileContent
 		if err := w.storage.UpdateJobBuildConfig(w.job.ID, &w.job.BuildConfig); err != nil {
 			w.log("WARNING: could not persist generated Dockerfile metadata: %v", err)
 		}
 
 		// Write the generated Dockerfile.
-		if err := os.WriteFile(dockerfilePath, dockerfileContent, 0644); err != nil {
+		if err := os.WriteFile(dockerfilePath, detectedConfig.DockerfileContent, 0644); err != nil {
 			w.log("ERROR: failed to write generated Dockerfile: %v", err)
 			return w.failJob("failed to write generated Dockerfile")
 		}
@@ -328,7 +419,7 @@ func (w *Worker) executeCommand(cmd *exec.Cmd) error {
 func (w *Worker) streamPipe(pipe io.Reader) {
 	scanner := bufio.NewScanner(pipe)
 	for scanner.Scan() {
-		w.log(scanner.Text())
+		w.log("%s", scanner.Text())
 	}
 }
 
@@ -450,6 +541,124 @@ func copyStringMap(values map[string]string) map[string]string {
 	return copied
 }
 
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
 func sanitize(s string) string {
 	return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
+}
+
+func resolveWorkspacePath(repoRoot, workingDir string) (string, string, error) {
+	trimmed := strings.TrimSpace(workingDir)
+	if trimmed == "" || trimmed == "." {
+		return ".", repoRoot, nil
+	}
+
+	cleaned := filepath.Clean(trimmed)
+	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", "", fmt.Errorf("working directory must stay within the repository root")
+	}
+
+	return filepath.ToSlash(cleaned), filepath.Join(repoRoot, cleaned), nil
+}
+
+func resolveBuildContextPath(repoRoot, buildContextDir string) (string, error) {
+	buildContextDir = strings.TrimSpace(buildContextDir)
+	if buildContextDir == "" || buildContextDir == "." {
+		return repoRoot, nil
+	}
+
+	cleaned := filepath.Clean(buildContextDir)
+	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("build context must stay within the repository root")
+	}
+
+	return filepath.Join(repoRoot, cleaned), nil
+}
+
+func detectDockerfileLayout(repoRoot, appDir string) (string, string) {
+	if appDir != "." {
+		appDockerfile := filepath.Join(repoRoot, filepath.FromSlash(appDir), "Dockerfile")
+		if info, err := os.Stat(appDockerfile); err == nil && info.Mode().IsRegular() {
+			return appDockerfile, appDir
+		}
+	}
+
+	rootDockerfile := filepath.Join(repoRoot, "Dockerfile")
+	if info, err := os.Stat(rootDockerfile); err == nil && info.Mode().IsRegular() {
+		return rootDockerfile, "."
+	}
+
+	return "", ""
+}
+
+func mergeWarnings(primary []string, extras []string) []string {
+	if len(primary) == 0 && len(extras) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(primary)+len(extras))
+	merged := make([]string, 0, len(primary)+len(extras))
+	for _, value := range append(append([]string{}, primary...), extras...) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	return merged
+}
+
+func hasStructuredBuildStrategy(cfg storage.BuildConfig) bool {
+	return autodetect.HasStructuredBuildPhases(toAutodetectBuildConfig(cfg))
+}
+
+func toAutodetectBuildConfig(cfg storage.BuildConfig) autodetect.BuildConfig {
+	cfg.NormalizePhaseAliases()
+	return autodetect.BuildConfig{
+		IsAutoBuild:        cfg.IsAutoBuild,
+		Runtime:            cfg.Runtime,
+		Framework:          cfg.Framework,
+		Version:            cfg.Version,
+		InstallCommand:     cfg.InstallCommand,
+		PrebuildCommand:    cfg.PrebuildCommand,
+		SetupCommands:      cloneStringSlice(cfg.SetupCommands),
+		BuildCommand:       cfg.BuildCommand,
+		PostBuildCommands:  cloneStringSlice(cfg.PostBuildCommands),
+		RunCommand:         cfg.RunCommand,
+		RuntimeInitCommand: cfg.RuntimeInitCommand,
+		ExposePort:         cfg.ExposePort,
+		BuildContextDir:    cfg.BuildContextDir,
+		AppDir:             cfg.AppDir,
+		ValidationWarnings: cloneStringSlice(cfg.ValidationWarnings),
+		DockerfileContent:  cfg.DockerfileContent,
+	}
+}
+
+func applyDetectedBuildConfig(dst *storage.BuildConfig, src autodetect.BuildConfig) {
+	dst.Runtime = src.Runtime
+	dst.Framework = src.Framework
+	dst.Version = src.Version
+	dst.InstallCommand = src.InstallCommand
+	dst.PrebuildCommand = src.PrebuildCommand
+	dst.SetupCommands = cloneStringSlice(src.SetupCommands)
+	dst.BuildCommand = src.BuildCommand
+	dst.PostBuildCommands = cloneStringSlice(src.PostBuildCommands)
+	dst.RunCommand = src.RunCommand
+	dst.RuntimeInitCommand = src.RuntimeInitCommand
+	dst.ExposePort = src.ExposePort
+	dst.BuildContextDir = src.BuildContextDir
+	dst.AppDir = src.AppDir
+	dst.DockerfileContent = src.DockerfileContent
+	dst.NormalizePhaseAliases()
 }

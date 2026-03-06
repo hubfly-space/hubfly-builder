@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -96,19 +97,28 @@ type ResolvedEnvVar struct {
 }
 
 type BuildConfig struct {
-	IsAutoBuild       bool              `json:"isAutoBuild"`
-	Runtime           string            `json:"runtime"`
-	Version           string            `json:"version"`
-	PrebuildCommand   string            `json:"prebuildCommand"`
-	BuildCommand      string            `json:"buildCommand"`
-	RunCommand        string            `json:"runCommand"`
-	Network           string            `json:"network,omitempty"`
-	TimeoutSeconds    int               `json:"timeoutSeconds"`
-	ResourceLimits    ResourceLimits    `json:"resourceLimits"`
-	Env               map[string]string `json:"env,omitempty"`
-	EnvOverrides      map[string]EnvOverride `json:"envOverrides,omitempty"`
-	ResolvedEnvPlan   []ResolvedEnvVar  `json:"resolvedEnvPlan,omitempty"`
-	DockerfileContent []byte            `json:"dockerfileContent,omitempty"`
+	IsAutoBuild        bool                   `json:"isAutoBuild"`
+	Runtime            string                 `json:"runtime"`
+	Framework          string                 `json:"framework,omitempty"`
+	Version            string                 `json:"version"`
+	InstallCommand     string                 `json:"installCommand,omitempty"`
+	PrebuildCommand    string                 `json:"prebuildCommand"`
+	SetupCommands      []string               `json:"setupCommands,omitempty"`
+	BuildCommand       string                 `json:"buildCommand"`
+	PostBuildCommands  []string               `json:"postBuildCommands,omitempty"`
+	RunCommand         string                 `json:"runCommand"`
+	RuntimeInitCommand string                 `json:"runtimeInitCommand,omitempty"`
+	ExposePort         string                 `json:"exposePort,omitempty"`
+	BuildContextDir    string                 `json:"buildContextDir,omitempty"`
+	AppDir             string                 `json:"appDir,omitempty"`
+	ValidationWarnings []string               `json:"validationWarnings,omitempty"`
+	Network            string                 `json:"network,omitempty"`
+	TimeoutSeconds     int                    `json:"timeoutSeconds"`
+	ResourceLimits     ResourceLimits         `json:"resourceLimits"`
+	Env                map[string]string      `json:"env,omitempty"`
+	EnvOverrides       map[string]EnvOverride `json:"envOverrides,omitempty"`
+	ResolvedEnvPlan    []ResolvedEnvVar       `json:"resolvedEnvPlan,omitempty"`
+	DockerfileContent  []byte                 `json:"dockerfileContent,omitempty"`
 }
 
 func (a *BuildConfig) Value() (driver.Value, error) {
@@ -124,7 +134,20 @@ func (a *BuildConfig) Scan(value interface{}) error {
 		}
 		b = []byte(s)
 	}
-	return json.Unmarshal(b, &a)
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	a.NormalizePhaseAliases()
+	return nil
+}
+
+func (a *BuildConfig) NormalizePhaseAliases() {
+	if strings.TrimSpace(a.InstallCommand) == "" {
+		a.InstallCommand = strings.TrimSpace(a.PrebuildCommand)
+	}
+	if strings.TrimSpace(a.PrebuildCommand) == "" {
+		a.PrebuildCommand = strings.TrimSpace(a.InstallCommand)
+	}
 }
 
 type BuildJob struct {
@@ -148,6 +171,7 @@ type BuildJob struct {
 }
 
 func (s *Storage) CreateJob(job *BuildJob) error {
+	job.BuildConfig.NormalizePhaseAliases()
 	job.CreatedAt = time.Now()
 	job.UpdatedAt = time.Now()
 	job.Status = "pending"
@@ -206,6 +230,7 @@ func (s *Storage) UpdateJobImageTag(id, imageTag string) error {
 }
 
 func (s *Storage) UpdateJobBuildConfig(id string, buildConfig *BuildConfig) error {
+	buildConfig.NormalizePhaseAliases()
 	_, err := s.db.Exec(`UPDATE build_jobs SET build_config = ?, updated_at = ? WHERE id = ?`, buildConfig, time.Now(), id)
 	return err
 }
