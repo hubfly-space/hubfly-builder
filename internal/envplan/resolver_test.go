@@ -109,6 +109,35 @@ func TestResolve_OverrideCanForceSecretOnDockerfileArg(t *testing.T) {
 	}
 }
 
+func TestResolve_WarnsWhenPublicBuildEnvIsReferencedButMissing(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "vite.config.ts"), []byte("const value = import.meta.env.VITE_API_URL\n"), 0o644); err != nil {
+		t.Fatalf("failed to write vite config: %v", err)
+	}
+
+	result := Resolve(dir, nil, nil)
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected missing build env warnings")
+	}
+	if !strings.Contains(result.Warnings[0], "VITE_API_URL") {
+		t.Fatalf("expected warning to mention VITE_API_URL, got %#v", result.Warnings)
+	}
+}
+
+func TestResolve_DoesNotWarnWhenReferencedPublicBuildEnvIsProvided(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "next.config.js"), []byte("process.env.NEXT_PUBLIC_API_URL\n"), 0o644); err != nil {
+		t.Fatalf("failed to write next config: %v", err)
+	}
+
+	result := Resolve(dir, map[string]string{
+		"NEXT_PUBLIC_API_URL": "https://api.example.com",
+	}, nil)
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no missing build env warnings, got %#v", result.Warnings)
+	}
+}
+
 func findEntry(entries []storage.ResolvedEnvVar, key string) *storage.ResolvedEnvVar {
 	for i := range entries {
 		if entries[i].Key == key {

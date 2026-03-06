@@ -3,6 +3,7 @@ package envplan
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -15,6 +16,7 @@ type Result struct {
 	BuildArgs    map[string]string
 	BuildSecrets map[string]string
 	Entries      []storage.ResolvedEnvVar
+	Warnings     []string
 }
 
 func (r Result) BuildArgKeys() []string {
@@ -47,12 +49,17 @@ func (r Result) RuntimeKeys() []string {
 }
 
 func Resolve(buildContext string, env map[string]string, envOverrides map[string]storage.EnvOverride) Result {
-	if len(env) == 0 {
-		return Result{}
-	}
+	return ResolveForPaths([]string{buildContext}, env, envOverrides)
+}
 
-	hints := collectBuildHints(buildContext)
+func ResolveForPaths(buildContexts []string, env map[string]string, envOverrides map[string]storage.EnvOverride) Result {
+	hints := collectBuildHintsForPaths(buildContexts)
 	normalizedOverrides := normalizeOverrides(envOverrides)
+	warnings := detectMissingBuildEnvWarnings(hints, env)
+
+	if len(env) == 0 {
+		return Result{Warnings: warnings}
+	}
 
 	entries := make([]storage.ResolvedEnvVar, 0, len(env))
 	buildArgs := make(map[string]string)
@@ -119,6 +126,7 @@ func Resolve(buildContext string, env map[string]string, envOverrides map[string
 		BuildArgs:    buildArgs,
 		BuildSecrets: buildSecrets,
 		Entries:      entries,
+		Warnings:     warnings,
 	}
 }
 
@@ -179,15 +187,34 @@ type buildHints struct {
 }
 
 func collectBuildHints(buildContext string) buildHints {
-	hints := buildHints{}
-	dockerfilePath := filepath.Join(buildContext, "Dockerfile")
-	hints.dockerfileContent = readUpperFile(dockerfilePath)
+	return collectBuildHintsForPaths([]string{buildContext})
+}
 
-	for _, fileName := range buildHintFiles {
-		path := filepath.Join(buildContext, fileName)
-		content := readUpperFile(path)
-		if content != "" {
-			hints.configContents = append(hints.configContents, content)
+func collectBuildHintsForPaths(buildContexts []string) buildHints {
+	hints := buildHints{}
+
+	seenPaths := make(map[string]struct{}, len(buildContexts))
+	for _, buildContext := range buildContexts {
+		buildContext = strings.TrimSpace(buildContext)
+		if buildContext == "" {
+			continue
+		}
+		if _, ok := seenPaths[buildContext]; ok {
+			continue
+		}
+		seenPaths[buildContext] = struct{}{}
+
+		dockerfilePath := filepath.Join(buildContext, "Dockerfile")
+		if content := readUpperFile(dockerfilePath); content != "" {
+			hints.dockerfileContent += "\n" + content
+		}
+
+		for _, fileName := range buildHintFiles {
+			path := filepath.Join(buildContext, fileName)
+			content := readUpperFile(path)
+			if content != "" {
+				hints.configContents = append(hints.configContents, content)
+			}
 		}
 	}
 
@@ -378,4 +405,59 @@ var buildHintFiles = []string{
 	"astro.config.ts",
 	"svelte.config.js",
 	"svelte.config.ts",
+}
+
+var publicBuildEnvPattern = regexp.MustCompile(`(?:NEXT_PUBLIC_|VITE_|REACT_APP_|NUXT_PUBLIC_|PUBLIC_|EXPO_PUBLIC_|GATSBY_|SVELTEKIT_PUBLIC_)[A-Z0-9_]+`)
+
+func detectMissingBuildEnvWarnings(hints buildHints, env map[string]string) []string {
+	referenced := collectReferencedPublicBuildKeys(hints)
+	if len(referenced) == 0 {
+		return nil
+	}
+
+	provided := make(map[string]struct{}, len(env)*2)
+	for key := range env {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		provided[trimmed] = struct{}{}
+		provided[strings.ToUpper(trimmed)] = struct{}{}
+	}
+
+	warnings := make([]string, 0, len(referenced))
+	for _, key := range referenced {
+		if _, ok := provided[key]; ok {
+			continue
+		}
+		warnings = append(warnings, "build-time env "+key+" is referenced but not provided")
+	}
+	return warnings
+}
+
+func collectReferencedPublicBuildKeys(hints buildHints) []string {
+	seen := make(map[string]struct{})
+	var keys []string
+
+	addMatches := func(content string) {
+		for _, match := range publicBuildEnvPattern.FindAllString(content, -1) {
+			match = strings.TrimSpace(match)
+			if match == "" {
+				continue
+			}
+			if _, ok := seen[match]; ok {
+				continue
+			}
+			seen[match] = struct{}{}
+			keys = append(keys, match)
+		}
+	}
+
+	addMatches(hints.dockerfileContent)
+	for _, content := range hints.configContents {
+		addMatches(content)
+	}
+
+	sort.Strings(keys)
+	return keys
 }
