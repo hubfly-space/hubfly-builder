@@ -308,9 +308,17 @@ func renderStaticDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 		builder.WriteString("COPY . .\n\n")
 	}
 
+	exposePort := strings.TrimSpace(plan.ExposePort)
+	if exposePort == "" {
+		exposePort = "8080"
+	}
+
 	builder.WriteString("RUN rm -f /etc/nginx/conf.d/default.conf && mkdir -p /etc/nginx/templates && cat <<'EOF' > /etc/nginx/templates/default.conf.template\n")
 	builder.WriteString("server {\n")
-	builder.WriteString("  listen ${PORT};\n")
+	builder.WriteString("  listen 80;\n")
+	if exposePort != "80" {
+		fmt.Fprintf(&builder, "  listen %s;\n", exposePort)
+	}
 	builder.WriteString("  server_name _;\n")
 	builder.WriteString("  root /usr/share/nginx/html;\n")
 	builder.WriteString("  index index.html;\n")
@@ -320,12 +328,12 @@ func renderStaticDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 	builder.WriteString("}\n")
 	builder.WriteString("EOF\n")
 
-	exposePort := strings.TrimSpace(plan.ExposePort)
-	if exposePort == "" {
-		exposePort = "8080"
-	}
 	fmt.Fprintf(&builder, "\nENV PORT=%s\n\n", exposePort)
-	fmt.Fprintf(&builder, "EXPOSE %s\n\n", exposePort)
+	builder.WriteString("EXPOSE 80\n")
+	if exposePort != "80" {
+		fmt.Fprintf(&builder, "EXPOSE %s\n", exposePort)
+	}
+	builder.WriteString("\n")
 	builder.WriteString("CMD [\"nginx\", \"-g\", \"daemon off;\"]\n")
 	return builder.String()
 }
