@@ -3,7 +3,10 @@ package executor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"hubfly-builder/internal/storage"
 )
 
 func TestDetectDockerfileLayoutIgnoresDockerfileDirectory(t *testing.T) {
@@ -39,5 +42,27 @@ func TestDetectDockerfileLayoutPrefersAppDockerfile(t *testing.T) {
 	}
 	if ctx != "apps/web" {
 		t.Fatalf("expected app build context, got %q", ctx)
+	}
+}
+
+func TestGenerateImageTagUsesRefFallbackWhenCommitMissing(t *testing.T) {
+	worker := &Worker{
+		registry: "registry.example.com:5000",
+		job: &storage.BuildJob{
+			ID:        "build_test",
+			ProjectID: "proj_test",
+			UserID:    "user_test",
+			SourceInfo: storage.SourceInfo{
+				Ref: "main",
+			},
+		},
+	}
+
+	tag := worker.generateImageTag()
+	if strings.Contains(tag, ":-b") {
+		t.Fatalf("expected non-empty image tag source component, got %q", tag)
+	}
+	if !strings.Contains(tag, ":main-bbuild_test-v") {
+		t.Fatalf("expected ref fallback in image tag, got %q", tag)
 	}
 }
