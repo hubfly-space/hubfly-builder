@@ -425,7 +425,13 @@ func (w *Worker) streamPipe(pipe io.Reader) {
 
 func (w *Worker) generateImageTag() string {
 	ts := time.Now().UTC().Format("20060102T150405Z")
-	shortSha := w.job.SourceInfo.CommitSha
+	shortSha := sanitizeImageTagComponent(w.job.SourceInfo.CommitSha)
+	if shortSha == "" {
+		shortSha = sanitizeImageTagComponent(w.job.SourceInfo.Ref)
+	}
+	if shortSha == "" {
+		shortSha = "latest"
+	}
 	if len(shortSha) > 12 {
 		shortSha = shortSha[:12]
 	}
@@ -552,6 +558,33 @@ func cloneStringSlice(values []string) []string {
 
 func sanitize(s string) string {
 	return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
+}
+
+func sanitizeImageTagComponent(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	for _, ch := range value {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			builder.WriteRune(ch)
+		case ch >= '0' && ch <= '9':
+			builder.WriteRune(ch)
+		case ch == '_', ch == '.', ch == '-':
+			builder.WriteRune(ch)
+		default:
+			builder.WriteByte('-')
+		}
+	}
+
+	cleaned := strings.Trim(builder.String(), ".-")
+	if cleaned == "" {
+		return ""
+	}
+	return cleaned
 }
 
 func resolveWorkspacePath(repoRoot, workingDir string) (string, string, error) {

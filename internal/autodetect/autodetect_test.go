@@ -429,8 +429,14 @@ func TestAutoDetectBuildConfigViteUsesStaticRuntime(t *testing.T) {
 	if !strings.Contains(dockerfile, "COPY --from=builder /app/dist/ ./") {
 		t.Fatalf("expected dist copy in Dockerfile, got:\n%s", dockerfile)
 	}
-	if !strings.Contains(dockerfile, "listen ${PORT};") {
-		t.Fatalf("expected dynamic PORT nginx template, got:\n%s", dockerfile)
+	if !strings.Contains(dockerfile, "listen 80;") {
+		t.Fatalf("expected nginx to listen on port 80 for static runtime, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "listen 8080;") {
+		t.Fatalf("expected nginx to listen on port 8080 for static runtime, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "EXPOSE 80") || !strings.Contains(dockerfile, "EXPOSE 8080") {
+		t.Fatalf("expected static Dockerfile to expose both 80 and 8080, got:\n%s", dockerfile)
 	}
 }
 

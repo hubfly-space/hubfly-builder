@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"hubfly-builder/internal/storage"
@@ -34,6 +35,7 @@ type ReportPayload struct {
 	UserID          string    `json:"userId"`
 	Status          string    `json:"status"`
 	ImageTag        string    `json:"imageTag,omitempty"`
+	ExposePort      string    `json:"exposePort,omitempty"`
 	StartedAt       time.Time `json:"startedAt"`
 	FinishedAt      time.Time `json:"finishedAt"`
 	DurationSeconds float64   `json:"durationSeconds"`
@@ -49,13 +51,14 @@ func (c *Client) ReportResult(job *storage.BuildJob, status, errorMsg string) er
 	}
 
 	payload := ReportPayload{
-		ID:        job.ID,
-		ProjectID: job.ProjectID,
-		UserID:    job.UserID,
-		Status:    status,
-		ImageTag:  job.ImageTag,
-		LogPath:   job.LogPath,
-		Error:     errorMsg,
+		ID:         job.ID,
+		ProjectID:  job.ProjectID,
+		UserID:     job.UserID,
+		Status:     status,
+		ImageTag:   job.ImageTag,
+		ExposePort: callbackExposePort(job.BuildConfig),
+		LogPath:    job.LogPath,
+		Error:      errorMsg,
 		ResolvedEnvPlan: job.BuildConfig.ResolvedEnvPlan,
 		RuntimeEnvKeys:  runtimeEnvKeys(job.BuildConfig.ResolvedEnvPlan),
 	}
@@ -122,4 +125,15 @@ func runtimeEnvKeys(plan []storage.ResolvedEnvVar) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func callbackExposePort(cfg storage.BuildConfig) string {
+	if !strings.EqualFold(strings.TrimSpace(cfg.Runtime), "static") {
+		return ""
+	}
+	port := strings.TrimSpace(cfg.ExposePort)
+	if port == "" {
+		return "8080"
+	}
+	return port
 }

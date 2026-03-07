@@ -133,6 +133,27 @@ Creates a new build job and queues it for execution.
 - The ephemeral daemon runs OCI workers in `host` network mode and build requests force `network=host`, so build `RUN` containers share the daemon network namespace (including the attached user network).
 - If missing/empty, the job is rejected with `no user network provided`.
 
+### Gateway Port Mapping
+
+- This applies to static sites served by the generated nginx runtime.
+- Static nginx listens on port `80` and `8080` by default, and both are exposed in the generated Dockerfile.
+- Callback payload includes `exposePort` for static runtime only.
+
+Examples:
+- Docker publish: `-p 80:8080`
+- Kubernetes Service: `port: 80`, `targetPort: 8080`
+- Nginx reverse proxy: `proxy_pass http://app:8080;`
+
+Callback payload excerpt:
+```json
+{
+  "id": "build_uuid_123",
+  "status": "success",
+  "imageTag": "registry.hubfly.com/user-123/my-app:abc123-bbuild_uuid_123-v20260210T123000Z",
+  "exposePort": "8080"
+}
+```
+
 - **Responses:**
   - `201 Created`: Job successfully queued. The response body includes the fully populated `BuildConfig`, including the auto-generated `dockerfileContent` (if `isAutoBuild` was `true`).
   - `400 Bad Request`: Invalid payload or failed repository inspection.
