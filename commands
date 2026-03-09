@@ -22,6 +22,6 @@ curl -s -I -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
 sudo mkdir -p /etc/docker
 sudo nano /etc/docker/daemon.json
 {
-  "insecure-registries": ["100.106.206.92:32768"]
+  "insecure-registries": ["127.0.0.1:10009"]
 }
 sudo systemctl restart docker
