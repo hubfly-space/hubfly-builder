@@ -19,30 +19,32 @@ import (
 const maxConcurrentBuilds = 3
 const logRetentionDays = 7
 
+const (
+	defaultBuildKitAddr = "docker-container://buildkitd"
+	defaultBuildKitHost = "docker-container://buildkitd"
+	defaultCallbackURL  = "https://hubfly.space/api/builds/callback"
+	defaultRegistryURL  = "127.0.0.1:5000"
+)
+
 type EnvConfig struct {
-	RegistryURL string `json:"REGISTRY_URL"`
-	CallbackURL string `json:"CALLBACK_URL"`
+	BuildKitAddr string `json:"BUILDKIT_ADDR"`
+	BuildKitHost string `json:"BUILDKIT_HOST"`
+	RegistryURL  string `json:"REGISTRY_URL"`
+	CallbackURL  string `json:"CALLBACK_URL"`
 }
 
-func loadOrInitEnvConfig() {
+func applyDefaultEnvConfig() {
+	setEnvIfEmpty("BUILDKIT_ADDR", defaultBuildKitAddr)
+	setEnvIfEmpty("BUILDKIT_HOST", defaultBuildKitHost)
+	setEnvIfEmpty("REGISTRY_URL", defaultRegistryURL)
+	setEnvIfEmpty("CALLBACK_URL", defaultCallbackURL)
+}
+
+func loadOptionalEnvConfig() {
 	filename := "configs/env.json"
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		// Ensure configs directory exists
-		if err := os.MkdirAll("configs", 0755); err != nil {
-			log.Printf("WARN: could not create configs directory: %v", err)
-			return
-		}
-
-		config := EnvConfig{
-			RegistryURL: "",
-			CallbackURL: "",
-		}
-		data, _ := json.MarshalIndent(config, "", "  ")
-		if err := os.WriteFile(filename, data, 0644); err != nil {
-			log.Printf("WARN: could not create default %s: %v", filename, err)
-		} else {
-			log.Printf("Created default %s", filename)
-		}
+		log.Printf("Optional config %s not found; using default environment values", filename)
+		return
 	}
 
 	data, err := os.ReadFile(filename)
@@ -57,7 +59,13 @@ func loadOrInitEnvConfig() {
 		return
 	}
 
-	// Set environment variables if they are present in the config
+	// Only override defaults when the optional config provides a value.
+	if config.BuildKitAddr != "" {
+		os.Setenv("BUILDKIT_ADDR", config.BuildKitAddr)
+	}
+	if config.BuildKitHost != "" {
+		os.Setenv("BUILDKIT_HOST", config.BuildKitHost)
+	}
 	if config.RegistryURL != "" {
 		os.Setenv("REGISTRY_URL", config.RegistryURL)
 	}
@@ -66,19 +74,19 @@ func loadOrInitEnvConfig() {
 	}
 }
 
+func setEnvIfEmpty(key, value string) {
+	if os.Getenv(key) == "" {
+		os.Setenv(key, value)
+	}
+}
+
 func main() {
-	loadOrInitEnvConfig()
+	applyDefaultEnvConfig()
+	loadOptionalEnvConfig()
 
 	registry := os.Getenv("REGISTRY_URL")
-	if registry == "" {
-		registry = "localhost:5000" // Example registry
-	}
 	callbackURL := os.Getenv("CALLBACK_URL") // e.g., "http://localhost:3000/api/builds/callback"
-
-	allowedCommands, err := allowlist.LoadAllowedCommands("configs/allowed-commands.json")
-	if err != nil {
-		log.Fatalf("could not load allowed commands: %s\n", err)
-	}
+	allowedCommands := allowlist.DefaultAllowedCommands()
 
 	storage, err := storage.NewStorage("./hubfly-builder.sqlite")
 	if err != nil {
@@ -102,7 +110,13 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stdout, systemLogFile))
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	log.Printf("System log file: %s", systemLogPath)
-	log.Printf("Env: REGISTRY_URL=%q CALLBACK_URL=%q", os.Getenv("REGISTRY_URL"), os.Getenv("CALLBACK_URL"))
+	log.Printf(
+		"Env: BUILDKIT_ADDR=%q BUILDKIT_HOST=%q REGISTRY_URL=%q CALLBACK_URL=%q",
+		os.Getenv("BUILDKIT_ADDR"),
+		os.Getenv("BUILDKIT_HOST"),
+		os.Getenv("REGISTRY_URL"),
+		os.Getenv("CALLBACK_URL"),
+	)
 	log.Printf("Effective: REGISTRY_URL=%q CALLBACK_URL=%q", registry, callbackURL)
 	if err := driver.CleanupOrphanedEphemeralBuildKits(); err != nil {
 		log.Printf("WARN: could not cleanup stale ephemeral BuildKit containers: %v", err)

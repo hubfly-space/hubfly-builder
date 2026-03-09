@@ -1,6 +1,6 @@
 # Hubfly Builder
 
-**Hubfly Builder** Is a high-performance, standalone Go service designed to orchestrate container image builds using [BuildKit](https://github.com/moby/buildkit). It provides a robust API for managing build jobs, supports automatic runtime detection, implements a secure command allowlist, and ensures persistence through a local SQLite database.
+**Hubfly Builder** Is a high-performance, standalone Go service designed to orchestrate container image builds using [BuildKit](https://github.com/moby/buildkit). It provides a robust API for managing build jobs, supports automatic runtime detection, uses a built-in command allowlist for generated commands, and ensures persistence through a local SQLite database.
 
 ## Architecture & Features
 
@@ -8,7 +8,7 @@
 - **BuildKit Backend:** Leverages the advanced features of BuildKit for efficient and secure image building.
 - **SQLite Persistence:** All job metadata, status, and history are stored locally, allowing the builder to resume operations after restarts.
 - **Auto-Detection (Zero-Config):** Automatically detects the runtime (Node.js, Bun, Go, Python, Java, etc.) and generates an optimized Dockerfile if one isn't provided.
-- **Secure by Design:** Commands are validated against a strict `allowed-commands.json` allowlist.
+- **Secure by Design:** Auto-detected commands are validated against a built-in allowlist.
 - **Structured Logging:** Job logs are captured, stored locally, and served via API.
 - **Backend Integration:** Reports build outcomes (success/failure) via configurable webhooks.
 - **Resource Management:** Supports configurable per-job resource limits (CPU/Memory).
@@ -18,25 +18,26 @@
 
 ## Configuration
 
-### Environment Variables & `configs/env.json`
+### Environment Variables & Optional `configs/env.json`
 
-The builder can be configured via environment variables or a JSON configuration file located at `configs/env.json`. If the file is missing, a default one is generated on startup.
+The builder can be configured via environment variables or an optional JSON override file at `configs/env.json`. If the file is missing, the builder uses built-in defaults and does not generate the file.
 
 | Key | Description | Default / Example |
 | :--- | :--- | :--- |
-| `REGISTRY_URL` | Default registry to push images to | `localhost:5000` |
-| `CALLBACK_URL` | Backend webhook for reporting results | `https://api.hubfly.space/builds/callback` |
+| `BUILDKIT_ADDR` | Default BuildKit address | `docker-container://buildkitd` |
+| `BUILDKIT_HOST` | Default BuildKit host | `docker-container://buildkitd` |
+| `REGISTRY_URL` | Default registry to push images to | `127.0.0.1:5000` |
+| `CALLBACK_URL` | Backend webhook for reporting results | `https://hubfly.space/api/builds/callback` |
 | `PORT` | Port for the builder server to listen on | `8781` |
 
-### Command Allowlist (`configs/allowed-commands.json`)
-
-To prevent arbitrary command execution, only commands listed in this file are permitted for `prebuild`, `build`, and `run` stages.
+Example optional `configs/env.json`:
 
 ```json
 {
-  "prebuild": ["npm install", "npm ci", "yarn install", "pnpm install", "bun install", "go work sync", "go mod download", "pip install -r requirements.txt", "pip install pipenv && pipenv install --system --deploy", "pip install .", "composer install", "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction", "mvn clean", "gradle dependencies"],
-  "build": ["npm run build", "npm run build:*", "yarn build", "yarn run build:*", "pnpm run build", "pnpm run build:*", "go build -o app .", "go build -o app ./cmd/*", "go build -o app ./*", "go build ./...", "bun run build", "composer dump-autoload --optimize", "php artisan optimize", "php bin/console cache:clear --env=prod --no-debug", "mvn install -DskipTests", "gradle build -x test"],
-  "run": ["npm start", "npm run *", "yarn start", "yarn run *", "pnpm start", "pnpm run *", "bun run start", "./app", "go run .", "go run ./cmd/*", "go run ./*", "python *.py", "python -m *", "python manage.py runserver 0.0.0.0:${PORT:-8000}", "uvicorn *:* --host 0.0.0.0 --port ${PORT:-8000}", "gunicorn *:* --bind 0.0.0.0:${PORT:-8000}", "apache2-foreground", "php-fpm -D && exec nginx -g 'daemon off;'", "php *.php", "java -jar target/*.jar", "java -jar build/libs/*.jar"]
+  "BUILDKIT_ADDR": "docker-container://buildkitd",
+  "BUILDKIT_HOST": "docker-container://buildkitd",
+  "REGISTRY_URL": "127.0.0.1:5000",
+  "CALLBACK_URL": "https://hubfly.space/api/builds/callback"
 }
 ```
 
