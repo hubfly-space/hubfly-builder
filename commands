@@ -1,4 +1,4 @@
-docker run -d -p 10009:5000 --restart always --name registry registry
+docker run -d -p 10009:5000 --restart always --name hub-registry registry
 
 LATEST=$(curl -s https://api.github.com/repos/moby/buildkit/releases/latest \
  | grep -o 'https://[^"]*linux-amd64.tar.gz')
@@ -10,11 +10,11 @@ sudo mv bin/buildkitd /usr/local/bin/
 sudo chmod +x /usr/local/bin/buildctl /usr/local/bin/buildkitd
 
 
-curl -s http://100.106.206.92:32768/v2/_catalog | jq -r '.repositories[]'
-curl -s http://100.106.206.92:32768/v2/user-123/my-project/tags/list
+curl -s http://127.0.0.1:10009/v2/_catalog | jq -r '.repositories[]'
+curl -s http://127.0.0.1:10009/v2/user-123/my-project/tags/list
 
 curl -s -I -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-  http://100.106.206.92:32768/v2/user-123/my-project/manifests/latest
+  http://127.0.0.1:10009/v2/user-123/my-project/manifests/latest
 
 
 
