@@ -28,5 +28,3 @@ jobs:
           name: Release ${{ github.ref_name }}
           files: |
             ./hubfly-builder
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT }}
