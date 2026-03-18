@@ -2,7 +2,9 @@ package driver
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -10,6 +12,8 @@ import (
 const (
 	ephemeralBuildKitImage            = "moby/buildkit:buildx-stable-1"
 	ephemeralBuildKitPort             = "1234"
+	ephemeralBuildKitConfigPath       = "configs/buildkitd.toml"
+	ephemeralBuildKitConfigMountPath  = "/etc/buildkit/buildkitd.toml"
 	ephemeralBuildKitLabelKey         = "hubfly.builder.ephemeral"
 	ephemeralBuildKitLabelValue       = "true"
 	ephemeralBuildKitWorkerNetMode    = "host"
@@ -49,17 +53,12 @@ func StartEphemeralBuildKit(opts EphemeralBuildKitOpts) (*EphemeralBuildKit, err
 		return nil, err
 	}
 
-	_, err := runDockerCommand(
-		"run", "-d", "--rm",
-		"--name", containerName,
-		"--privileged",
-		"--label", ephemeralBuildKitLabelKey+"="+ephemeralBuildKitLabelValue,
-		"--network", userNetwork,
-		ephemeralBuildKitImage,
-		"--addr", "tcp://0.0.0.0:"+ephemeralBuildKitPort,
-		"--oci-worker-net="+ephemeralBuildKitWorkerNetMode,
-		"--allow-insecure-entitlement="+ephemeralBuildKitHostEntitlement,
-	)
+	buildKitConfigPath, err := resolveBuildKitConfigPath()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = runDockerCommand(buildEphemeralBuildKitRunArgs(containerName, userNetwork, buildKitConfigPath)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start ephemeral buildkit container %q: %w", containerName, err)
 	}
@@ -88,6 +87,45 @@ func StartEphemeralBuildKit(opts EphemeralBuildKitOpts) (*EphemeralBuildKit, err
 
 	cleanupOnFailure = false
 	return session, nil
+}
+
+func resolveBuildKitConfigPath() (string, error) {
+	_, err := os.Stat(ephemeralBuildKitConfigPath)
+	if err == nil {
+		absPath, absErr := filepath.Abs(ephemeralBuildKitConfigPath)
+		if absErr != nil {
+			return "", fmt.Errorf("failed to resolve BuildKit config path %q: %w", ephemeralBuildKitConfigPath, absErr)
+		}
+		return absPath, nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", fmt.Errorf("failed to access BuildKit config %q: %w", ephemeralBuildKitConfigPath, err)
+}
+
+func buildEphemeralBuildKitRunArgs(containerName, userNetwork, configPath string) []string {
+	args := []string{
+		"run", "-d", "--rm",
+		"--name", containerName,
+		"--privileged",
+		"--label", ephemeralBuildKitLabelKey + "=" + ephemeralBuildKitLabelValue,
+		"--network", userNetwork,
+	}
+	if strings.TrimSpace(configPath) != "" {
+		args = append(args, "-v", configPath+":"+ephemeralBuildKitConfigMountPath+":ro")
+	}
+	args = append(args, ephemeralBuildKitImage)
+	if strings.TrimSpace(configPath) != "" {
+		args = append(args, "--config", ephemeralBuildKitConfigMountPath)
+	}
+	args = append(
+		args,
+		"--addr", "tcp://0.0.0.0:"+ephemeralBuildKitPort,
+		"--oci-worker-net="+ephemeralBuildKitWorkerNetMode,
+		"--allow-insecure-entitlement="+ephemeralBuildKitHostEntitlement,
+	)
+	return args
 }
 
 func (s *EphemeralBuildKit) Stop() error {

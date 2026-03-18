@@ -41,6 +41,22 @@ Example optional `configs/env.json`:
 }
 ```
 
+### Optional `configs/buildkitd.toml`
+
+If `configs/buildkitd.toml` exists, the builder automatically mounts it into every ephemeral `buildkitd` container and starts BuildKit with `--config /etc/buildkit/buildkitd.toml`.
+
+Default project config:
+
+```toml
+debug = true
+
+[dns]
+  nameservers = ["1.1.1.1", "8.8.8.8"]
+
+[registry."docker.io"]
+  mirrors = ["mirror.gcr.io"]
+```
+
 ---
 
 ## Runtime Layout
@@ -52,6 +68,7 @@ At runtime the builder creates and uses these local paths:
 | `./data/hubfly-builder.sqlite` | SQLite database for jobs and state |
 | `./log/` | System log and per-job build logs |
 | `./configs/env.json` | Optional local config overrides |
+| `./configs/buildkitd.toml` | Optional BuildKit daemon config mounted into ephemeral BuildKit containers |
 
 Make sure the process user can create and write these paths.
 
@@ -301,6 +318,7 @@ For each job, the builder:
 - removes the temporary workspace and the ephemeral BuildKit container
 
 The Docker network provided in `buildConfig.network` must already exist before the job is submitted.
+If `./configs/buildkitd.toml` exists, it is applied to that ephemeral BuildKit daemon for settings such as DNS, debug logging, and registry mirrors.
 
 ### Build From Source
 ```bash
@@ -310,12 +328,17 @@ go mod download
 go build -o hubfly-builder ./cmd/hubfly-builder
 ```
 
+### Release Bundle
+
+The GitHub release now publishes the raw `hubfly-builder` Linux binary and a stable `hubfly-builder-linux-amd64.zip` bundle. Extracting the zip places `hubfly-builder` at the archive root, alongside `README.md` and the `configs/` directory.
+
 ### Run The Server
 ```bash
 ./hubfly-builder
 ```
 
 The server will start on port `10008` by default.
+Run it from the project root or the extracted release bundle root so the relative `./configs`, `./data`, and `./log` paths resolve correctly.
 
 ### Development Run
 
