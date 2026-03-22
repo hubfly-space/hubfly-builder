@@ -446,7 +446,7 @@ func (s *Server) ResetDatabaseHandler(w http.ResponseWriter, r *http.Request) {
 
 func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "OK")
+	fmt.Fprintln(w, "healthy")
 }
 
 func copyStringMap(values map[string]string) map[string]string {
