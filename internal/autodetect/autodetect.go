@@ -69,7 +69,7 @@ func DetectRuntime(repoPath string) (string, string) {
 		return "php", "8.3"
 	}
 	if fileExists(filepath.Join(repoPath, "pom.xml")) || fileExists(filepath.Join(repoPath, "build.gradle")) || fileExists(filepath.Join(repoPath, "build.gradle.kts")) {
-		return "java", "17"
+		return "java", "21"
 	}
 	if fileExists(filepath.Join(repoPath, "index.html")) {
 		return "static", "latest"
