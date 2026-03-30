@@ -13,6 +13,9 @@ import (
 
 type composerJSON struct {
 	Require map[string]string `json:"require"`
+	Config  *struct {
+		Platform map[string]string `json:"platform"`
+	} `json:"config,omitempty"`
 }
 
 type phpExtensionRule struct {

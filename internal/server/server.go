@@ -165,7 +165,7 @@ func (s *Server) CreateJobHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			runtime, version := autodetect.DetectRuntime(inspectDir)
+			runtime, version := autodetect.DetectRuntimeWithContext(tempDir, inspectDir)
 			job.BuildConfig = storage.BuildConfig{
 				IsAutoBuild:        true,
 				Runtime:            runtime,

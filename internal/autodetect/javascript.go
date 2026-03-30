@@ -71,7 +71,7 @@ func detectBuildPlan(opts AutoDetectOptions, allowed *allowlist.AllowedCommands)
 		appPath = filepath.Join(repoRoot, filepath.FromSlash(appDir))
 	}
 
-	runtime, version := DetectRuntime(appPath)
+	runtime, version := DetectRuntimeWithContext(repoRoot, appPath)
 	switch runtime {
 	case "node", "bun":
 		plan, err := detectJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version)
