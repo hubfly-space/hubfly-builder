@@ -97,7 +97,7 @@ func manualBuildPlanFromConfig(opts AutoDetectOptions, cfg BuildConfig) (buildPl
 		appPath = filepath.Join(repoRoot, filepath.FromSlash(appDir))
 	}
 
-	detectedRuntime, detectedVersion := DetectRuntime(appPath)
+	detectedRuntime, detectedVersion := DetectRuntimeWithContext(repoRoot, appPath)
 	runtime := strings.TrimSpace(cfg.Runtime)
 	if runtime == "" {
 		runtime = detectedRuntime

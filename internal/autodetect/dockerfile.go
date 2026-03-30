@@ -46,6 +46,7 @@ func defaultBuildPlan(runtime, version, installCommand, buildCommand, runCommand
 			RunCommand:     runCommand,
 			ExposePort:     "8000",
 			BuilderImage:   "python:" + version + "-slim",
+			RuntimeImage:   "python:" + version + "-slim",
 		}, nil
 	case "go":
 		return buildPlan{
@@ -56,6 +57,7 @@ func defaultBuildPlan(runtime, version, installCommand, buildCommand, runCommand
 			RunCommand:     runCommand,
 			ExposePort:     "8080",
 			BuilderImage:   "golang:" + version + "-alpine",
+			RuntimeImage:   "alpine:3.20",
 		}, nil
 	case "bun":
 		return buildPlan{
@@ -80,6 +82,7 @@ func defaultBuildPlan(runtime, version, installCommand, buildCommand, runCommand
 			RunCommand:     runCommand,
 			ExposePort:     "8080",
 			BuilderImage:   selectJavaBaseImage(version, installCommand, buildCommand),
+			RuntimeImage:   selectJavaRuntimeImage(version),
 		}, nil
 	case "php":
 		return buildPlan{
@@ -127,6 +130,14 @@ func selectJavaBaseImage(version, prebuildCommand, buildCommand string) string {
 	}
 }
 
+func selectJavaRuntimeImage(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "17"
+	}
+	return "eclipse-temurin:" + version + "-jre"
+}
+
 func generateDockerfileForPlan(plan buildPlan, buildArgKeys, secretBuildKeys []string) ([]byte, error) {
 	buildArgKeys = normalizeKeys(buildArgKeys)
 	secretBuildKeys = normalizeKeys(secretBuildKeys)
@@ -136,6 +147,10 @@ func generateDockerfileForPlan(plan buildPlan, buildArgKeys, secretBuildKeys []s
 		return []byte(strings.TrimSpace(renderStaticDockerfile(plan, buildArgKeys, secretBuildKeys)) + "\n"), nil
 	case plan.Runtime == "php":
 		return []byte(strings.TrimSpace(renderPHPDockerfile(plan, buildArgKeys, secretBuildKeys)) + "\n"), nil
+	case plan.Runtime == "python":
+		return []byte(strings.TrimSpace(renderPythonDockerfile(plan, buildArgKeys, secretBuildKeys)) + "\n"), nil
+	case plan.Runtime == "go":
+		return []byte(strings.TrimSpace(renderGoDockerfile(plan, buildArgKeys, secretBuildKeys)) + "\n"), nil
 	case strings.TrimSpace(plan.BuilderImage) != "":
 		return []byte(strings.TrimSpace(renderApplicationDockerfile(plan, buildArgKeys, secretBuildKeys)) + "\n"), nil
 	default:
@@ -144,6 +159,80 @@ func generateDockerfileForPlan(plan buildPlan, buildArgKeys, secretBuildKeys []s
 }
 
 func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) string {
+	if !shouldUseMultiStage(plan) {
+		return renderSingleStageDockerfile(plan, buildArgKeys, secretBuildKeys)
+	}
+
+	var builder strings.Builder
+	builderImage := strings.TrimSpace(plan.BuilderImage)
+	fmt.Fprintf(&builder, "FROM %s AS builder\n\n", builderImage)
+	builder.WriteString("WORKDIR /app\n\n")
+	builder.WriteString("COPY . .\n\n")
+
+	if argLines := renderArgLines(buildArgKeys); argLines != "" {
+		builder.WriteString(argLines)
+	}
+	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
+		builder.WriteString(aptLine)
+	}
+	for _, command := range plan.BootstrapCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	for _, command := range []string{plan.InstallCommand} {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	for _, command := range plan.SetupCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	if runLine := renderRunLine(plan.BuildCommand, secretBuildKeys); runLine != "" {
+		builder.WriteString(runLine)
+	}
+	for _, command := range plan.PostBuildCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+
+	if prune := runtimePruneCommand(plan); prune != "" {
+		builder.WriteString(prune)
+	}
+
+	builder.WriteString("\n")
+
+	runtimeImage := strings.TrimSpace(plan.RuntimeImage)
+	if runtimeImage == "" {
+		runtimeImage = builderImage
+	}
+	fmt.Fprintf(&builder, "FROM %s\n\n", runtimeImage)
+	builder.WriteString("WORKDIR /app\n\n")
+
+	if aptLine := renderAptInstallLine(runtimeAptPackages(plan)); aptLine != "" {
+		builder.WriteString(aptLine)
+	}
+	builder.WriteString("COPY --from=builder /app/ /app/\n\n")
+
+	if envLines := renderEnvLines(plan.RuntimeEnv); envLines != "" {
+		builder.WriteString("\n")
+		builder.WriteString(envLines)
+	}
+	if strings.TrimSpace(plan.ExposePort) != "" {
+		fmt.Fprintf(&builder, "\nEXPOSE %s\n", strings.TrimSpace(plan.ExposePort))
+	}
+	if cmdLine := renderCmdLine(plan.RunCommand, plan.RuntimeInitCommand); cmdLine != "" {
+		builder.WriteString("\n")
+		builder.WriteString(cmdLine)
+	}
+
+	return builder.String()
+}
+
+func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "FROM %s\n\n", strings.TrimSpace(plan.BuilderImage))
 	builder.WriteString("WORKDIR /app\n\n")
@@ -179,6 +268,10 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		}
 	}
 
+	if prune := runtimePruneCommand(plan); prune != "" {
+		builder.WriteString(prune)
+	}
+
 	if envLines := renderEnvLines(plan.RuntimeEnv); envLines != "" {
 		builder.WriteString("\n")
 		builder.WriteString(envLines)
@@ -192,6 +285,194 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 	}
 
 	return builder.String()
+}
+
+func runtimeAptPackages(plan buildPlan) []string {
+	switch strings.TrimSpace(strings.ToLower(plan.Runtime)) {
+	case "python":
+		return plan.AptPackages
+	default:
+		return nil
+	}
+}
+
+func shouldUseMultiStage(plan buildPlan) bool {
+	switch strings.TrimSpace(strings.ToLower(plan.Runtime)) {
+	case "php":
+		return false
+	default:
+		return true
+	}
+}
+
+func runtimePruneCommand(plan buildPlan) string {
+	switch strings.TrimSpace(strings.ToLower(plan.Runtime)) {
+	case "node":
+		return "RUN rm -rf .git .next/cache .turbo .cache node_modules/.cache && " +
+			"if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then rm -rf node_modules && npm ci --omit=dev; " +
+			"elif [ -f pnpm-lock.yaml ]; then rm -rf node_modules && corepack enable && pnpm install --prod --frozen-lockfile; " +
+			"elif [ -f yarn.lock ]; then rm -rf node_modules && corepack enable && yarn install --production --frozen-lockfile; " +
+			"else npm prune --omit=dev || npm install --omit=dev; " +
+			"fi && rm -rf /root/.npm /root/.cache /tmp/*\n"
+	case "bun":
+		return "RUN rm -rf .git .next/cache .turbo .cache node_modules/.cache && " +
+			"if [ -f bun.lockb ] || [ -f bun.lock ]; then rm -rf node_modules && bun install --production --frozen-lockfile; " +
+			"fi && rm -rf /root/.bun /root/.cache /tmp/*\n"
+	default:
+		return ""
+	}
+}
+
+func renderPythonDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) string {
+	var builder strings.Builder
+	builderImage := strings.TrimSpace(plan.BuilderImage)
+	fmt.Fprintf(&builder, "FROM %s AS builder\n\n", builderImage)
+	builder.WriteString("WORKDIR /app\n\n")
+	builder.WriteString("COPY . .\n\n")
+
+	if argLines := renderArgLines(buildArgKeys); argLines != "" {
+		builder.WriteString(argLines)
+	}
+	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
+		builder.WriteString(aptLine)
+	}
+
+	builder.WriteString("RUN python -m venv /opt/venv\n")
+	builder.WriteString("ENV VIRTUAL_ENV=/opt/venv\n")
+	builder.WriteString("ENV PATH=\"/opt/venv/bin:$PATH\"\n\n")
+
+	for _, command := range plan.BootstrapCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	if runLine := renderRunLine(plan.InstallCommand, secretBuildKeys); runLine != "" {
+		builder.WriteString(runLine)
+	}
+	for _, command := range plan.SetupCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	if runLine := renderRunLine(plan.BuildCommand, secretBuildKeys); runLine != "" {
+		builder.WriteString(runLine)
+	}
+	for _, command := range plan.PostBuildCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	builder.WriteString("RUN rm -rf /root/.cache/pip /tmp/*\n\n")
+
+	runtimeImage := strings.TrimSpace(plan.RuntimeImage)
+	if runtimeImage == "" {
+		runtimeImage = builderImage
+	}
+	fmt.Fprintf(&builder, "FROM %s\n\n", runtimeImage)
+	builder.WriteString("WORKDIR /app\n\n")
+
+	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
+		builder.WriteString(aptLine)
+	}
+	builder.WriteString("ENV VIRTUAL_ENV=/opt/venv\n")
+	builder.WriteString("ENV PATH=\"/opt/venv/bin:$PATH\"\n\n")
+	builder.WriteString("COPY --from=builder /opt/venv /opt/venv\n")
+	builder.WriteString("COPY --from=builder /app/ /app/\n\n")
+
+	if envLines := renderEnvLines(plan.RuntimeEnv); envLines != "" {
+		builder.WriteString("\n")
+		builder.WriteString(envLines)
+	}
+	if strings.TrimSpace(plan.ExposePort) != "" {
+		fmt.Fprintf(&builder, "\nEXPOSE %s\n", strings.TrimSpace(plan.ExposePort))
+	}
+	if cmdLine := renderCmdLine(plan.RunCommand, plan.RuntimeInitCommand); cmdLine != "" {
+		builder.WriteString("\n")
+		builder.WriteString(cmdLine)
+	}
+	return builder.String()
+}
+
+func renderGoDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) string {
+	if !shouldUseGoMultiStage(plan) {
+		return renderSingleStageDockerfile(plan, buildArgKeys, secretBuildKeys)
+	}
+
+	var builder strings.Builder
+	builderImage := strings.TrimSpace(plan.BuilderImage)
+	fmt.Fprintf(&builder, "FROM %s AS builder\n\n", builderImage)
+	builder.WriteString("WORKDIR /app\n\n")
+	builder.WriteString("COPY . .\n\n")
+
+	if argLines := renderArgLines(buildArgKeys); argLines != "" {
+		builder.WriteString(argLines)
+	}
+	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
+		builder.WriteString(aptLine)
+	}
+	for _, command := range plan.BootstrapCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	if runLine := renderRunLine(plan.InstallCommand, secretBuildKeys); runLine != "" {
+		builder.WriteString(runLine)
+	}
+	for _, command := range plan.SetupCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	if runLine := renderRunLine(plan.BuildCommand, secretBuildKeys); runLine != "" {
+		builder.WriteString(runLine)
+	}
+	for _, command := range plan.PostBuildCommands {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
+	builder.WriteString("\n")
+
+	runtimeImage := strings.TrimSpace(plan.RuntimeImage)
+	if runtimeImage == "" {
+		runtimeImage = builderImage
+	}
+	fmt.Fprintf(&builder, "FROM %s\n\n", runtimeImage)
+	builder.WriteString("WORKDIR /app\n\n")
+
+	if runtimeInstall := renderGoRuntimeInstall(runtimeImage); runtimeInstall != "" {
+		builder.WriteString(runtimeInstall)
+	}
+	builder.WriteString("COPY --from=builder /app/ /app/\n\n")
+
+	if envLines := renderEnvLines(plan.RuntimeEnv); envLines != "" {
+		builder.WriteString("\n")
+		builder.WriteString(envLines)
+	}
+	if strings.TrimSpace(plan.ExposePort) != "" {
+		fmt.Fprintf(&builder, "\nEXPOSE %s\n", strings.TrimSpace(plan.ExposePort))
+	}
+	if cmdLine := renderCmdLine(plan.RunCommand, plan.RuntimeInitCommand); cmdLine != "" {
+		builder.WriteString("\n")
+		builder.WriteString(cmdLine)
+	}
+	return builder.String()
+}
+
+func shouldUseGoMultiStage(plan buildPlan) bool {
+	run := strings.ToLower(strings.TrimSpace(plan.RunCommand))
+	if strings.Contains(run, "go run") {
+		return false
+	}
+	return true
+}
+
+func renderGoRuntimeInstall(runtimeImage string) string {
+	image := strings.ToLower(strings.TrimSpace(runtimeImage))
+	if strings.Contains(image, "alpine") {
+		return "RUN apk add --no-cache ca-certificates\n\n"
+	}
+	return renderAptInstallLine([]string{"ca-certificates"})
 }
 
 func renderPHPDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) string {

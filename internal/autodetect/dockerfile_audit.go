@@ -33,7 +33,7 @@ func AuditDockerfileWithOptions(opts AutoDetectOptions, dockerfilePath string) D
 		appPath = filepath.Join(repoRoot, filepath.FromSlash(appDir))
 	}
 
-	runtime, version := DetectRuntime(appPath)
+	runtime, version := DetectRuntimeWithContext(repoRoot, appPath)
 	result := DockerfileAuditResult{}
 	lower := strings.ToLower(string(data))
 

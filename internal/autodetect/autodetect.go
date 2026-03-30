@@ -32,6 +32,7 @@ type BuildConfig struct {
 
 type nodePackageJSON struct {
 	Scripts         map[string]string `json:"scripts"`
+	Engines         map[string]string `json:"engines"`
 	PackageManager  string            `json:"packageManager"`
 	Dependencies    map[string]string `json:"dependencies"`
 	DevDependencies map[string]string `json:"devDependencies"`
@@ -53,28 +54,7 @@ func (c *BuildConfig) NormalizePhaseAliases() {
 }
 
 func DetectRuntime(repoPath string) (string, string) {
-	if fileExists(filepath.Join(repoPath, "bun.lock")) { //new version of bun is bun.lock
-		return "bun", "1.2" // Simplified version detection
-	}
-	if fileExists(filepath.Join(repoPath, "package.json")) {
-		return "node", "22" // Simplified version detection
-	}
-	if isPythonProject(repoPath) {
-		return "python", "3.9" // Simplified version detection
-	}
-	if fileExists(filepath.Join(repoPath, "go.mod")) {
-		return "go", "1.18" // Simplified version detection
-	}
-	if fileExists(filepath.Join(repoPath, "composer.json")) {
-		return "php", "8.3"
-	}
-	if fileExists(filepath.Join(repoPath, "pom.xml")) || fileExists(filepath.Join(repoPath, "build.gradle")) || fileExists(filepath.Join(repoPath, "build.gradle.kts")) {
-		return "java", "21"
-	}
-	if fileExists(filepath.Join(repoPath, "index.html")) {
-		return "static", "latest"
-	}
-	return "unknown", ""
+	return DetectRuntimeWithContext(repoPath, repoPath)
 }
 
 func DetectCommands(runtime string, allowed *allowlist.AllowedCommands) (string, string, string) {
