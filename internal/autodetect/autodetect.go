@@ -27,6 +27,8 @@ type BuildConfig struct {
 	BuildContextDir    string   `json:"buildContextDir,omitempty"`
 	AppDir             string   `json:"appDir,omitempty"`
 	ValidationWarnings []string `json:"validationWarnings,omitempty"`
+	UseStaticRuntime   bool     `json:"useStaticRuntime,omitempty"`
+	StaticOutputDir    string   `json:"staticOutputDir,omitempty"`
 	DockerfileContent  []byte   `json:"dockerfileContent"`
 }
 

@@ -69,6 +69,8 @@ func buildConfigFromPlan(plan buildPlan, isAutoBuild bool, buildArgKeys, secretB
 		BuildContextDir:    normalizePlanDirOrDefault(plan.BuildContextDir, "."),
 		AppDir:             normalizePlanDirOrDefault(plan.AppDir, "."),
 		ValidationWarnings: cloneStringSlice(plan.ValidationWarnings),
+		UseStaticRuntime:   plan.UseStaticRuntime,
+		StaticOutputDir:    strings.TrimSpace(plan.StaticOutputDir),
 		DockerfileContent:  dockerfile,
 	}
 	cfg.NormalizePhaseAliases()
@@ -154,6 +156,9 @@ func manualJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version, buil
 	}
 
 	buildScript := selectJSBuildScript(ctx.AppMetadata)
+	if framework == "angular" && detectAngularSSR(ctx) && hasNodeScript(ctx.AppMetadata.Scripts, "build:ssr") {
+		buildScript = "build:ssr"
+	}
 	runScript := selectJSRunScript(ctx.AppMetadata)
 	installCommand := strings.TrimSpace(cfg.InstallCommand)
 	if installCommand == "" {
@@ -171,9 +176,22 @@ func manualJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version, buil
 		case runtime == "node" && framework == "next":
 			port := inferJavaScriptExposePort(ctx, framework, runScript)
 			runCommand = prefixCommand(ctx.appWorkDir, fmt.Sprintf("./node_modules/.bin/next start --hostname 0.0.0.0 --port ${PORT:-%s}", port))
-		case runtime == "node" && framework == "nuxt":
+		case runtime == "node" && framework == "angular":
 			port := inferJavaScriptExposePort(ctx, framework, runScript)
-			runCommand = prefixCommand(ctx.appWorkDir, fmt.Sprintf("HOST=0.0.0.0 PORT=${PORT:-%s} node .output/server/index.mjs", port))
+			if detectAngularSSR(ctx) && port == "4200" {
+				port = "4000"
+			}
+			runCommand = detectAngularRunCommand(ctx, port)
+		case runtime == "node" && framework == "astro":
+			runCommand = detectAstroRunCommand(ctx, inferJavaScriptExposePort(ctx, framework, runScript))
+		case runtime == "node" && framework == "remix":
+			runCommand = detectRemixRunCommand(ctx, inferJavaScriptExposePort(ctx, framework, runScript))
+		case runtime == "node" && framework == "nuxt":
+			runCommand = detectJavaScriptRunCommand(ctx, runScript)
+			if strings.TrimSpace(runCommand) == "" {
+				port := inferJavaScriptExposePort(ctx, framework, runScript)
+				runCommand = prefixCommand(ctx.appWorkDir, fmt.Sprintf("HOST=0.0.0.0 PORT=${PORT:-%s} node .output/server/index.mjs", port))
+			}
 		default:
 			runCommand = detectJavaScriptRunCommand(ctx, runScript)
 		}
@@ -184,6 +202,7 @@ func manualJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version, buil
 		Framework:          framework,
 		Version:            version,
 		InstallCommand:     installCommand,
+		DependencyFiles:    nil,
 		SetupCommands:      mergeUniqueCommands(detectJavaScriptSetupCommands(ctx), cfg.SetupCommands),
 		BuildCommand:       buildCommand,
 		PostBuildCommands:  cloneStringSlice(cfg.PostBuildCommands),
@@ -199,6 +218,9 @@ func manualJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version, buil
 		},
 		AptPackages: detectJavaScriptSystemPackages(ctx.AppMetadata),
 		appWorkDir:  ctx.appWorkDir,
+	}
+	if canInstallWithoutFullSource(ctx) {
+		plan.DependencyFiles = detectJavaScriptDependencyFiles(ctx)
 	}
 	if shouldAutoInstallNextSharp(ctx, framework) {
 		plan.AptPackages = appendJavaScriptSystemPackages(plan.AptPackages, "ca-certificates", "git", "openssl", "python3", "make", "g++", "pkg-config")

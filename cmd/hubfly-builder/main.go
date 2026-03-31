@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"hubfly-builder/internal/allowlist"
@@ -24,6 +26,8 @@ const (
 	defaultBuildKitHost = "docker-container://buildkitd"
 	defaultCallbackURL  = "https://hubfly.space/api/builds/callback"
 	defaultRegistryURL  = "127.0.0.1:10009"
+	defaultCacheBackend = "local"
+	defaultCacheDir     = "data/buildkit-cache"
 	defaultServerAddr   = ":10008"
 )
 
@@ -34,12 +38,16 @@ type EnvConfig struct {
 	BuildKitHost string `json:"BUILDKIT_HOST"`
 	RegistryURL  string `json:"REGISTRY_URL"`
 	CallbackURL  string `json:"CALLBACK_URL"`
+	CacheBackend string `json:"BUILDKIT_CACHE_BACKEND"`
+	CacheDir     string `json:"BUILDKIT_CACHE_DIR"`
 }
 
 func applyDefaultEnvConfig() {
 	setEnvIfEmpty("BUILDKIT_ADDR", defaultBuildKitAddr)
 	setEnvIfEmpty("BUILDKIT_HOST", defaultBuildKitHost)
 	setEnvIfEmpty("REGISTRY_URL", defaultRegistryURL)
+	setEnvIfEmpty("BUILDKIT_CACHE_BACKEND", defaultCacheBackend)
+	setEnvIfEmpty("BUILDKIT_CACHE_DIR", defaultCacheDir)
 	setEnvIfEmpty("CALLBACK_URL", defaultCallbackURL)
 }
 
@@ -72,6 +80,12 @@ func loadOptionalEnvConfig() {
 	if config.RegistryURL != "" {
 		os.Setenv("REGISTRY_URL", config.RegistryURL)
 	}
+	if config.CacheBackend != "" {
+		os.Setenv("BUILDKIT_CACHE_BACKEND", config.CacheBackend)
+	}
+	if config.CacheDir != "" {
+		os.Setenv("BUILDKIT_CACHE_DIR", config.CacheDir)
+	}
 	if config.CallbackURL != "" {
 		os.Setenv("CALLBACK_URL", config.CallbackURL)
 	}
@@ -83,6 +97,28 @@ func setEnvIfEmpty(key, value string) {
 	}
 }
 
+func ensureBuildKitCacheDir() {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("BUILDKIT_CACHE_BACKEND"))) != "local" {
+		return
+	}
+
+	cacheDir := strings.TrimSpace(os.Getenv("BUILDKIT_CACHE_DIR"))
+	if cacheDir == "" {
+		return
+	}
+
+	absCacheDir, err := filepath.Abs(cacheDir)
+	if err != nil {
+		log.Printf("WARN: could not resolve BUILDKIT_CACHE_DIR %q: %v", cacheDir, err)
+		return
+	}
+	if err := os.MkdirAll(absCacheDir, 0o755); err != nil {
+		log.Printf("WARN: could not create BUILDKIT_CACHE_DIR %q: %v", absCacheDir, err)
+		return
+	}
+	os.Setenv("BUILDKIT_CACHE_DIR", absCacheDir)
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		_, _ = io.WriteString(os.Stdout, version+"\n")
@@ -91,6 +127,7 @@ func main() {
 
 	applyDefaultEnvConfig()
 	loadOptionalEnvConfig()
+	ensureBuildKitCacheDir()
 
 	registry := os.Getenv("REGISTRY_URL")
 	callbackURL := os.Getenv("CALLBACK_URL") // e.g., "http://localhost:3000/api/builds/callback"
