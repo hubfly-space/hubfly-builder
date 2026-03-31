@@ -167,10 +167,13 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 	builderImage := strings.TrimSpace(plan.BuilderImage)
 	fmt.Fprintf(&builder, "FROM %s AS builder\n\n", builderImage)
 	builder.WriteString("WORKDIR /app\n\n")
-	builder.WriteString("COPY . .\n\n")
 
 	if argLines := renderArgLines(buildArgKeys); argLines != "" {
 		builder.WriteString(argLines)
+	}
+	cacheMounts := buildCacheMounts(plan)
+	if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+		builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
 	}
 	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
 		builder.WriteString(aptLine)
@@ -180,17 +183,40 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 			builder.WriteString(runLine)
 		}
 	}
-	for _, command := range []string{plan.InstallCommand} {
+
+	preSetupCommands, postSetupCommands := splitSetupCommands(plan)
+
+	depFiles := normalizeDependencyFiles(plan.DependencyFiles)
+	if len(depFiles) > 0 {
+		builder.WriteString("COPY ")
+		builder.WriteString(strings.Join(depFiles, " "))
+		builder.WriteString(" ./\n\n")
+		for _, command := range []string{plan.InstallCommand} {
+			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+		}
+		for _, command := range preSetupCommands {
+			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+		}
+		builder.WriteString("COPY . .\n\n")
+	} else {
+		builder.WriteString("COPY . .\n\n")
+		for _, command := range []string{plan.InstallCommand} {
+			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+		}
+		postSetupCommands = append(preSetupCommands, postSetupCommands...)
+	}
+	for _, command := range postSetupCommands {
 		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
 			builder.WriteString(runLine)
 		}
 	}
-	for _, command := range plan.SetupCommands {
-		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
-			builder.WriteString(runLine)
-		}
-	}
-	if runLine := renderRunLine(plan.BuildCommand, secretBuildKeys); runLine != "" {
+	if runLine := renderRunLineWithCaches(plan.BuildCommand, cacheMounts, secretBuildKeys); runLine != "" {
 		builder.WriteString(runLine)
 	}
 	for _, command := range plan.PostBuildCommands {
@@ -236,10 +262,13 @@ func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "FROM %s\n\n", strings.TrimSpace(plan.BuilderImage))
 	builder.WriteString("WORKDIR /app\n\n")
-	builder.WriteString("COPY . .\n\n")
 
 	if argLines := renderArgLines(buildArgKeys); argLines != "" {
 		builder.WriteString(argLines)
+	}
+	cacheMounts := buildCacheMounts(plan)
+	if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+		builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
 	}
 	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
 		builder.WriteString(aptLine)
@@ -249,17 +278,40 @@ func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 			builder.WriteString(runLine)
 		}
 	}
-	for _, command := range []string{plan.InstallCommand} {
+
+	preSetupCommands, postSetupCommands := splitSetupCommands(plan)
+
+	depFiles := normalizeDependencyFiles(plan.DependencyFiles)
+	if len(depFiles) > 0 {
+		builder.WriteString("COPY ")
+		builder.WriteString(strings.Join(depFiles, " "))
+		builder.WriteString(" ./\n\n")
+		for _, command := range []string{plan.InstallCommand} {
+			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+		}
+		for _, command := range preSetupCommands {
+			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+		}
+		builder.WriteString("COPY . .\n\n")
+	} else {
+		builder.WriteString("COPY . .\n\n")
+		for _, command := range []string{plan.InstallCommand} {
+			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+		}
+		postSetupCommands = append(preSetupCommands, postSetupCommands...)
+	}
+	for _, command := range postSetupCommands {
 		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
 			builder.WriteString(runLine)
 		}
 	}
-	for _, command := range plan.SetupCommands {
-		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
-			builder.WriteString(runLine)
-		}
-	}
-	if runLine := renderRunLine(plan.BuildCommand, secretBuildKeys); runLine != "" {
+	if runLine := renderRunLineWithCaches(plan.BuildCommand, cacheMounts, secretBuildKeys); runLine != "" {
 		builder.WriteString(runLine)
 	}
 	for _, command := range plan.PostBuildCommands {
@@ -285,6 +337,26 @@ func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 	}
 
 	return builder.String()
+}
+
+func normalizeDependencyFiles(files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(files))
+	out := make([]string, 0, len(files))
+	for _, file := range files {
+		file = strings.TrimSpace(file)
+		if file == "" || strings.HasPrefix(file, "/") {
+			continue
+		}
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
+		out = append(out, file)
+	}
+	return out
 }
 
 func runtimeAptPackages(plan buildPlan) []string {
@@ -328,7 +400,6 @@ func renderPythonDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 	builderImage := strings.TrimSpace(plan.BuilderImage)
 	fmt.Fprintf(&builder, "FROM %s AS builder\n\n", builderImage)
 	builder.WriteString("WORKDIR /app\n\n")
-	builder.WriteString("COPY . .\n\n")
 
 	if argLines := renderArgLines(buildArgKeys); argLines != "" {
 		builder.WriteString(argLines)
@@ -340,6 +411,8 @@ func renderPythonDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 	builder.WriteString("RUN python -m venv /opt/venv\n")
 	builder.WriteString("ENV VIRTUAL_ENV=/opt/venv\n")
 	builder.WriteString("ENV PATH=\"/opt/venv/bin:$PATH\"\n\n")
+
+	builder.WriteString("COPY . .\n\n")
 
 	for _, command := range plan.BootstrapCommands {
 		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
@@ -402,7 +475,6 @@ func renderGoDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) 
 	builderImage := strings.TrimSpace(plan.BuilderImage)
 	fmt.Fprintf(&builder, "FROM %s AS builder\n\n", builderImage)
 	builder.WriteString("WORKDIR /app\n\n")
-	builder.WriteString("COPY . .\n\n")
 
 	if argLines := renderArgLines(buildArgKeys); argLines != "" {
 		builder.WriteString(argLines)
@@ -410,6 +482,7 @@ func renderGoDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) 
 	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
 		builder.WriteString(aptLine)
 	}
+	builder.WriteString("COPY . .\n\n")
 	for _, command := range plan.BootstrapCommands {
 		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
 			builder.WriteString(runLine)
@@ -539,10 +612,13 @@ func renderStaticDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 	if strings.TrimSpace(plan.BuilderImage) != "" {
 		fmt.Fprintf(&builder, "FROM %s AS builder\n\n", strings.TrimSpace(plan.BuilderImage))
 		builder.WriteString("WORKDIR /app\n\n")
-		builder.WriteString("COPY . .\n\n")
 
 		if argLines := renderArgLines(buildArgKeys); argLines != "" {
 			builder.WriteString(argLines)
+		}
+		cacheMounts := buildCacheMounts(plan)
+		if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+			builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
 		}
 		if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
 			builder.WriteString(aptLine)
@@ -552,15 +628,35 @@ func renderStaticDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 				builder.WriteString(runLine)
 			}
 		}
-		if runLine := renderRunLine(plan.InstallCommand, secretBuildKeys); runLine != "" {
-			builder.WriteString(runLine)
+
+		preSetupCommands, postSetupCommands := splitSetupCommands(plan)
+		depFiles := normalizeDependencyFiles(plan.DependencyFiles)
+		if len(depFiles) > 0 {
+			builder.WriteString("COPY ")
+			builder.WriteString(strings.Join(depFiles, " "))
+			builder.WriteString(" ./\n\n")
+			if runLine := renderRunLine(plan.InstallCommand, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+			for _, command := range preSetupCommands {
+				if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+					builder.WriteString(runLine)
+				}
+			}
+			builder.WriteString("COPY . .\n\n")
+		} else {
+			builder.WriteString("COPY . .\n\n")
+			if runLine := renderRunLine(plan.InstallCommand, secretBuildKeys); runLine != "" {
+				builder.WriteString(runLine)
+			}
+			postSetupCommands = append(preSetupCommands, postSetupCommands...)
 		}
-		for _, command := range plan.SetupCommands {
+		for _, command := range postSetupCommands {
 			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
 				builder.WriteString(runLine)
 			}
 		}
-		if runLine := renderRunLine(plan.BuildCommand, secretBuildKeys); runLine != "" {
+		if runLine := renderRunLineWithCaches(plan.BuildCommand, cacheMounts, secretBuildKeys); runLine != "" {
 			builder.WriteString(runLine)
 		}
 		for _, command := range plan.PostBuildCommands {
@@ -650,6 +746,160 @@ func renderRunLine(command string, secretBuildKeys []string) string {
 
 	payload := "set -e; " + strings.Join(exports, " ") + " " + command
 	return fmt.Sprintf("RUN %s sh -c '%s'\n", strings.Join(mountFlags, " "), escapeSingleQuotes(payload))
+}
+
+type cacheMount struct {
+	Target string
+	ID     string
+}
+
+func renderRunLineWithCaches(command string, caches []cacheMount, secretBuildKeys []string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+
+	mountFlags := make([]string, 0, len(secretBuildKeys)+len(caches))
+	for _, cache := range caches {
+		target := strings.TrimSpace(cache.Target)
+		if target == "" {
+			continue
+		}
+		flag := fmt.Sprintf("--mount=type=cache,target=%s", target)
+		if id := strings.TrimSpace(cache.ID); id != "" {
+			flag += ",id=" + id
+		}
+		mountFlags = append(mountFlags, flag)
+	}
+
+	if len(secretBuildKeys) == 0 {
+		if len(mountFlags) == 0 {
+			return fmt.Sprintf("RUN %s\n", command)
+		}
+		return fmt.Sprintf("RUN %s %s\n", strings.Join(mountFlags, " "), command)
+	}
+
+	exports := make([]string, 0, len(secretBuildKeys))
+	for _, key := range secretBuildKeys {
+		mountFlags = append(mountFlags, fmt.Sprintf("--mount=type=secret,id=%s", key))
+		exports = append(exports, fmt.Sprintf("export %s=\"$(cat /run/secrets/%s)\";", key, key))
+	}
+
+	payload := "set -e; " + strings.Join(exports, " ") + " " + command
+	return fmt.Sprintf("RUN %s sh -c '%s'\n", strings.Join(mountFlags, " "), escapeSingleQuotes(payload))
+}
+
+func buildCacheMounts(plan buildPlan) []cacheMount {
+	if strings.TrimSpace(plan.BuildCommand) == "" {
+		return nil
+	}
+
+	framework := strings.ToLower(strings.TrimSpace(plan.Framework))
+	switch framework {
+	case "next":
+		return []cacheMount{
+			cacheMountFor(plan, ".next/cache", cacheIDSuffix(framework, "next-cache")),
+		}
+	case "nuxt":
+		return []cacheMount{
+			cacheMountFor(plan, ".nuxt", cacheIDSuffix(framework, "nuxt")),
+			cacheMountFor(plan, "node_modules/.cache/nuxt", cacheIDSuffix(framework, "node-cache")),
+		}
+	case "vite":
+		return []cacheMount{
+			cacheMountFor(plan, "node_modules/.vite", cacheIDSuffix(framework, "vite")),
+			cacheMountFor(plan, "node_modules/.cache/vite", cacheIDSuffix(framework, "node-cache")),
+		}
+	case "astro":
+		return []cacheMount{
+			cacheMountFor(plan, "node_modules/.astro", cacheIDSuffix(framework, "astro")),
+			cacheMountFor(plan, "node_modules/.cache/astro", cacheIDSuffix(framework, "node-cache")),
+		}
+	case "angular":
+		return []cacheMount{
+			cacheMountFor(plan, ".angular/cache", cacheIDSuffix(framework, "angular-cache")),
+		}
+	case "cra":
+		return []cacheMount{
+			cacheMountFor(plan, "node_modules/.cache", cacheIDSuffix(framework, "node-cache")),
+		}
+	case "sveltekit":
+		return []cacheMount{
+			cacheMountFor(plan, ".svelte-kit", cacheIDSuffix(framework, "svelte-kit")),
+			cacheMountFor(plan, "node_modules/.vite", cacheIDSuffix(framework, "vite")),
+		}
+	case "remix":
+		return []cacheMount{
+			cacheMountFor(plan, "node_modules/.cache/remix", cacheIDSuffix(framework, "remix-cache")),
+		}
+	default:
+		return nil
+	}
+}
+
+func cacheMountFor(plan buildPlan, relPath, idSuffix string) cacheMount {
+	base := "/app"
+	target := joinContainerPath(joinContainerPath(base, plan.appWorkDir), relPath)
+	return cacheMount{
+		Target: target,
+		ID:     "${HBF_CACHE_ID}" + idSuffix,
+	}
+}
+
+func cacheIDSuffix(parts ...string) string {
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = normalizeCacheIDComponent(part)
+		if part != "" {
+			normalized = append(normalized, part)
+		}
+	}
+	if len(normalized) == 0 {
+		return ""
+	}
+	return "-" + strings.Join(normalized, "-")
+}
+
+func normalizeCacheIDComponent(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	out := strings.Trim(builder.String(), "-")
+	for strings.Contains(out, "--") {
+		out = strings.ReplaceAll(out, "--", "-")
+	}
+	return out
+}
+
+func splitSetupCommands(plan buildPlan) ([]string, []string) {
+	if len(plan.SetupCommands) == 0 {
+		return nil, nil
+	}
+
+	pre := make([]string, 0, len(plan.SetupCommands))
+	post := make([]string, 0, len(plan.SetupCommands))
+	for _, command := range plan.SetupCommands {
+		canonical := stripTrustedCommandPrefixes(command)
+		if trustedNextSharpPattern.MatchString(strings.TrimSpace(canonical)) {
+			pre = append(pre, command)
+			continue
+		}
+		post = append(post, command)
+	}
+	return pre, post
 }
 
 func renderCmdLine(command, initCommand string) string {
@@ -777,4 +1027,17 @@ func normalizeKeys(keys []string) []string {
 
 	sort.Strings(out)
 	return out
+}
+
+func containsKey(keys []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" || len(keys) == 0 {
+		return false
+	}
+	for _, key := range keys {
+		if strings.TrimSpace(key) == needle {
+			return true
+		}
+	}
+	return false
 }

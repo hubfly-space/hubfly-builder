@@ -1,12 +1,12 @@
 package autodetect
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"hubfly-builder/internal/allowlist"
@@ -18,6 +18,7 @@ type buildPlan struct {
 	Framework          string
 	Version            string
 	InstallCommand     string
+	DependencyFiles    []string
 	SetupCommands      []string
 	BuildCommand       string
 	PostBuildCommands  []string
@@ -132,7 +133,20 @@ func detectBuildPlan(opts AutoDetectOptions, allowed *allowlist.AllowedCommands)
 func detectJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version string) (buildPlan, error) {
 	ctx := newJSProjectContext(repoRoot, appDir, appPath, runtime, version)
 	framework := detectJSFramework(ctx)
+	if framework == "sveltekit" {
+		if adapter := detectSvelteKitAdapter(ctx); adapter != "" {
+			if reason, ok := svelteKitPlatformAdapterReason(adapter); ok {
+				return buildPlan{}, fmt.Errorf("SvelteKit adapter %s detected; deploy to that platform or switch to adapter-node or adapter-static for container builds", reason)
+			}
+		}
+	}
 	buildScript := selectJSBuildScript(ctx.AppMetadata)
+	if framework == "angular" && detectAngularSSR(ctx) && hasNodeScript(ctx.AppMetadata.Scripts, "build:ssr") {
+		buildScript = "build:ssr"
+	}
+	if framework == "nuxt" && detectNuxtStatic(ctx) && hasNodeScript(ctx.AppMetadata.Scripts, "generate") {
+		buildScript = "generate"
+	}
 	runScript := selectJSRunScript(ctx.AppMetadata)
 
 	plan := buildPlan{
@@ -146,7 +160,13 @@ func detectJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version strin
 		BuilderImage:    selectJavaScriptBuilderImage(ctx.Runtime, ctx.Version),
 		appWorkDir:      ctx.appWorkDir,
 	}
+	if canInstallWithoutFullSource(ctx) {
+		plan.DependencyFiles = detectJavaScriptDependencyFiles(ctx)
+	}
 	plan.ExposePort = inferJavaScriptExposePort(ctx, framework, runScript)
+	if framework == "angular" && detectAngularSSR(ctx) && plan.ExposePort == "4200" {
+		plan.ExposePort = "4000"
+	}
 	plan.RuntimeEnv = map[string]string{"HOST": "0.0.0.0", "PORT": plan.ExposePort}
 
 	if ctx.Runtime != "bun" {
@@ -187,10 +207,23 @@ func detectJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version strin
 
 	if runtime == "node" && framework == "next" {
 		plan.RunCommand = prefixCommand(plan.appWorkDir, fmt.Sprintf("./node_modules/.bin/next start --hostname 0.0.0.0 --port ${PORT:-%s}", plan.ExposePort))
+	} else if runtime == "node" && framework == "angular" {
+		plan.RunCommand = detectAngularRunCommand(ctx, plan.ExposePort)
+	} else if runtime == "node" && framework == "astro" {
+		plan.RunCommand = detectAstroRunCommand(ctx, plan.ExposePort)
+	} else if runtime == "node" && framework == "remix" {
+		plan.RunCommand = detectRemixRunCommand(ctx, plan.ExposePort)
 	} else if runtime == "node" && framework == "nuxt" {
-		plan.RunCommand = prefixCommand(plan.appWorkDir, fmt.Sprintf("HOST=0.0.0.0 PORT=${PORT:-%s} node .output/server/index.mjs", plan.ExposePort))
+		plan.RunCommand = detectJavaScriptRunCommand(ctx, runScript)
+		if strings.TrimSpace(plan.RunCommand) == "" {
+			plan.RunCommand = prefixCommand(plan.appWorkDir, fmt.Sprintf("HOST=0.0.0.0 PORT=${PORT:-%s} node .output/server/index.mjs", plan.ExposePort))
+		}
 	} else {
 		plan.RunCommand = detectJavaScriptRunCommand(ctx, runScript)
+	}
+
+	if runtime == "node" && strings.TrimSpace(plan.RunCommand) == "" && hasAnyPackage(ctx.AppMetadata, "@nestjs/core") {
+		plan.RunCommand = prefixCommand(plan.appWorkDir, "HOST=0.0.0.0 PORT=${PORT:-"+plan.ExposePort+"} node dist/main.js")
 	}
 
 	if strings.TrimSpace(plan.RunCommand) == "" {
@@ -205,8 +238,12 @@ func inferJavaScriptExposePort(ctx jsProjectContext, framework, runScript string
 	switch framework {
 	case "vite":
 		defaultPort = "5173"
+	case "vue", "solid":
+		defaultPort = "5173"
 	case "angular":
 		defaultPort = "4200"
+	case "astro":
+		defaultPort = "4321"
 	}
 
 	sources := make([]string, 0, 8)
@@ -346,6 +383,66 @@ func detectJavaScriptPackageManager(repoRoot, appPath, runtime string, isWorkspa
 	return name, spec
 }
 
+func canInstallWithoutFullSource(ctx jsProjectContext) bool {
+	if scriptsRequireSource(ctx.RootMetadata) {
+		return false
+	}
+	if scriptsRequireSource(ctx.AppMetadata) {
+		return false
+	}
+	return true
+}
+
+func scriptsRequireSource(meta *nodePackageJSON) bool {
+	if meta == nil || meta.Scripts == nil {
+		return false
+	}
+	for _, name := range []string{"preinstall", "install", "postinstall", "prepare", "preprepare", "postprepare"} {
+		if strings.TrimSpace(meta.Scripts[name]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func detectJavaScriptDependencyFiles(ctx jsProjectContext) []string {
+	candidates := []string{
+		"package.json",
+		"package-lock.json",
+		"npm-shrinkwrap.json",
+		"pnpm-lock.yaml",
+		"pnpm-workspace.yaml",
+		"yarn.lock",
+		".yarnrc",
+		".yarnrc.yml",
+		".npmrc",
+		"bun.lockb",
+		"bun.lock",
+		"bunfig.toml",
+		".yarn",
+	}
+
+	files := make([]string, 0, len(candidates))
+	addIfExists := func(relPath string) {
+		if relPath == "" {
+			return
+		}
+		checkPath := filepath.Join(ctx.BuildContextPath, filepath.FromSlash(relPath))
+		if fileExists(checkPath) {
+			files = append(files, relPath)
+		}
+	}
+	for _, name := range candidates {
+		addIfExists(name)
+	}
+	if ctx.AppDir != "." && ctx.AppDir != "" {
+		for _, name := range candidates {
+			addIfExists(path.Join(ctx.AppDir, name))
+		}
+	}
+	return files
+}
+
 func parsePackageManagerSpec(spec string) (string, string) {
 	spec = strings.ToLower(strings.TrimSpace(spec))
 	if spec == "" {
@@ -461,11 +558,34 @@ func shouldAutoInstallNextSharp(ctx jsProjectContext, framework string) bool {
 }
 
 func detectJSFramework(ctx jsProjectContext) string {
+	if isReactRouterApp(ctx) {
+		return "remix"
+	}
 	switch {
 	case hasAnyPackage(ctx.AppMetadata, "next"):
 		return "next"
+	case hasAnyPackage(ctx.AppMetadata, "@sveltejs/kit"):
+		return "sveltekit"
+	case hasAnyPackage(ctx.AppMetadata, "@remix-run/dev") ||
+		hasAnyPackage(ctx.AppMetadata, "@remix-run/node") ||
+		hasAnyPackage(ctx.AppMetadata, "remix") ||
+		hasAnyPackage(ctx.AppMetadata, "@react-router/dev") ||
+		hasAnyPackage(ctx.AppMetadata, "@react-router/node") ||
+		hasAnyPackage(ctx.AppMetadata, "@react-router/serve") ||
+		hasScriptBodyContaining(ctx.AppMetadata, "react-router build"):
+		return "remix"
 	case hasAnyPackage(ctx.AppMetadata, "nuxt"):
 		return "nuxt"
+	case isSolidStartApp(ctx):
+		return "solidstart"
+	case hasAnyPackage(ctx.AppMetadata, "sails"):
+		return "sails"
+	case hasAnyPackage(ctx.AppMetadata, "fastify"):
+		return "fastify"
+	case hasAnyPackage(ctx.AppMetadata, "vue"):
+		return "vue"
+	case hasAnyPackage(ctx.AppMetadata, "solid-js"):
+		return "solid"
 	case hasAnyPackage(ctx.AppMetadata, "vite") || hasAnyFile(ctx.AppPath, []string{"vite.config.ts", "vite.config.js", "vite.config.mjs", "vite.config.cjs"}) || hasScriptBodyContaining(ctx.AppMetadata, "vite"):
 		return "vite"
 	case hasAnyPackage(ctx.AppMetadata, "astro"):
@@ -477,6 +597,39 @@ func detectJSFramework(ctx jsProjectContext) string {
 	default:
 		return ""
 	}
+}
+
+func isReactRouterApp(ctx jsProjectContext) bool {
+	remixConfigFiles := []string{
+		"react-router.config.ts",
+		"react-router.config.js",
+		"react-router.config.mjs",
+		"react-router.config.cjs",
+		"remix.config.ts",
+		"remix.config.js",
+		"remix.config.mjs",
+		"remix.config.cjs",
+	}
+	if hasAnyFile(ctx.AppPath, remixConfigFiles) || (ctx.BuildContextPath != ctx.AppPath && hasAnyFile(ctx.BuildContextPath, remixConfigFiles)) {
+		return true
+	}
+	if hasAnyPackage(ctx.AppMetadata, "@remix-run/dev", "@remix-run/node", "remix", "@react-router/dev", "@react-router/node", "@react-router/serve") {
+		return true
+	}
+	if hasScriptBodyContaining(ctx.AppMetadata, "react-router build") {
+		return true
+	}
+	return false
+}
+
+func isSolidStartApp(ctx jsProjectContext) bool {
+	if hasAnyPackage(ctx.AppMetadata, "@solidjs/start", "@solidjs/start-node", "solid-start") {
+		return true
+	}
+	if hasScriptBodyContaining(ctx.AppMetadata, "solid-start") {
+		return true
+	}
+	return false
 }
 
 func hasAnyFile(dir string, names []string) bool {
@@ -577,13 +730,40 @@ func shouldUseStaticRuntime(ctx jsProjectContext, framework, buildScript, runScr
 	if strings.TrimSpace(buildScript) == "" {
 		return false
 	}
+	if isReactRouterApp(ctx) {
+		return !detectRemixSSR(ctx)
+	}
 	switch framework {
 	case "vite":
 		return true
-	case "next", "nuxt":
+	case "vue", "solid":
+		return true
+	case "solidstart":
 		return false
+	case "next":
+		return false
+	case "nuxt":
+		return detectNuxtStatic(ctx)
+	case "angular":
+		return !detectAngularSSR(ctx)
+	case "astro":
+		return !detectAstroSSR(ctx)
+	case "remix":
+		return !detectRemixSSR(ctx)
+	case "sveltekit":
+		switch detectSvelteKitAdapter(ctx) {
+		case "static":
+			return true
+		case "node", "auto":
+			return false
+		default:
+			return false
+		}
 	}
 	if hasAnyPackage(ctx.AppMetadata, "express", "koa", "fastify", "@nestjs/core", "hono") {
+		return false
+	}
+	if hasAnyPackage(ctx.AppMetadata, "sails") {
 		return false
 	}
 
@@ -597,7 +777,7 @@ func shouldUseStaticRuntime(ctx jsProjectContext, framework, buildScript, runScr
 	}
 
 	switch framework {
-	case "vite", "astro", "cra", "angular":
+	case "vite", "vue", "solid", "astro", "cra", "angular":
 		if runBody == "" {
 			return true
 		}
@@ -621,14 +801,693 @@ func normalizeStaticFramework(framework string) string {
 }
 
 func detectStaticOutputDir(ctx jsProjectContext, framework string) string {
+	if isReactRouterApp(ctx) {
+		return joinContainerPath(ctx.appWorkDir, "build/client")
+	}
 	switch framework {
 	case "cra":
 		return joinContainerPath(ctx.appWorkDir, "build")
-	case "vite":
+	case "angular":
+		if outputDir := detectAngularStaticOutputDir(ctx); outputDir != "" {
+			return outputDir
+		}
+		return joinContainerPath(ctx.appWorkDir, "dist")
+	case "nuxt":
+		return joinContainerPath(ctx.appWorkDir, ".output/public")
+	case "remix":
+		return joinContainerPath(ctx.appWorkDir, "build/client")
+	case "sveltekit":
+		if outputDir := detectSvelteKitStaticOutputDir(ctx); outputDir != "" {
+			return outputDir
+		}
+		return joinContainerPath(ctx.appWorkDir, "build")
+	case "vite", "vue", "solid":
 		return joinContainerPath(ctx.appWorkDir, detectViteOutputDir(ctx))
 	default:
 		return joinContainerPath(ctx.appWorkDir, "dist")
 	}
+}
+
+func detectNuxtStatic(ctx jsProjectContext) bool {
+	if ctx.AppMetadata != nil {
+		if hasNodeScript(ctx.AppMetadata.Scripts, "generate") {
+			return true
+		}
+		if hasScriptBodyContaining(ctx.AppMetadata, "nuxt generate") || hasScriptBodyContaining(ctx.AppMetadata, "nuxi generate") {
+			return true
+		}
+	}
+	for _, name := range []string{"nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs", "nuxt.config.cjs"} {
+		configPath := filepath.Join(ctx.AppPath, name)
+		if data, err := os.ReadFile(configPath); err == nil {
+			lower := strings.ToLower(string(data))
+			if strings.Contains(lower, "ssr: false") || strings.Contains(lower, "target: 'static'") || strings.Contains(lower, "target: \"static\"") || strings.Contains(lower, "preset: 'static'") || strings.Contains(lower, "preset: \"static\"") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type angularConfig struct {
+	DefaultProject string                   `json:"defaultProject"`
+	Projects       map[string]angularProject `json:"projects"`
+}
+
+type angularProject struct {
+	Root      string                  `json:"root"`
+	Architect map[string]angularTarget `json:"architect"`
+	Targets   map[string]angularTarget `json:"targets"`
+}
+
+type angularTarget struct {
+	Builder             string                    `json:"builder"`
+	Executor            string                    `json:"executor"`
+	DefaultConfiguration string                   `json:"defaultConfiguration"`
+	Options             map[string]any            `json:"options"`
+	Configurations      map[string]map[string]any `json:"configurations"`
+}
+
+func loadAngularConfig(ctx jsProjectContext) (angularConfig, string, string, bool) {
+	configPath := filepath.Join(ctx.BuildContextPath, "angular.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil && ctx.BuildContextPath != ctx.AppPath {
+		configPath = filepath.Join(ctx.AppPath, "angular.json")
+		data, err = os.ReadFile(configPath)
+	}
+	if err != nil {
+		return angularConfig{}, "", "", false
+	}
+
+	var cfg angularConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return angularConfig{}, "", "", false
+	}
+
+	projectName := pickAngularProject(cfg, effectiveAngularAppDir(ctx))
+	if projectName == "" {
+		return angularConfig{}, "", "", false
+	}
+	configRoot := "."
+	if configPath == filepath.Join(ctx.AppPath, "angular.json") && ctx.BuildContextPath != ctx.AppPath && ctx.AppDir != "" {
+		configRoot = ctx.AppDir
+	}
+	configRoot = strings.TrimSpace(strings.Trim(configRoot, "/"))
+	if configRoot == "" {
+		configRoot = "."
+	}
+	return cfg, projectName, configRoot, true
+}
+
+func effectiveAngularAppDir(ctx jsProjectContext) string {
+	if ctx.BuildContextDir != "." && ctx.AppDir == ctx.BuildContextDir {
+		return "."
+	}
+	return ctx.AppDir
+}
+
+func detectAngularOutputPaths(ctx jsProjectContext) (string, string, string) {
+	cfg, projectName, configRoot, ok := loadAngularConfig(ctx)
+	if !ok {
+		return "", "", ""
+	}
+	project, ok := cfg.Projects[projectName]
+	if !ok {
+		return "", "", ""
+	}
+
+	target := project.Architect["build"]
+	if len(target.Options) == 0 {
+		target = project.Targets["build"]
+	}
+	if len(target.Options) == 0 {
+		// allow configurations-only outputPath
+		target.Options = map[string]any{}
+	}
+	baseDefault := resolveAngularOutputPath(configRoot, joinContainerPath("", path.Join("dist", projectName)))
+	raw, ok := target.Options["outputPath"]
+	if !ok {
+		raw, ok = angularOutputPathFromConfigurations(target)
+		if !ok {
+			return baseDefault, "", ""
+		}
+	}
+	base, browser, server := parseAngularOutputPath(raw)
+	base = resolveAngularOutputPath(configRoot, base)
+	browser = resolveAngularOutputPath(configRoot, browser)
+	server = resolveAngularOutputPath(configRoot, server)
+	if base == "" {
+		base = baseDefault
+	}
+	return base, browser, server
+}
+
+func angularOutputPathFromConfigurations(target angularTarget) (any, bool) {
+	if len(target.Configurations) == 0 {
+		return nil, false
+	}
+	configName := strings.TrimSpace(target.DefaultConfiguration)
+	if configName == "" {
+		if _, ok := target.Configurations["production"]; ok {
+			configName = "production"
+		}
+	}
+	if configName == "" && len(target.Configurations) == 1 {
+		for name := range target.Configurations {
+			configName = name
+			break
+		}
+	}
+	if configName == "" {
+		return nil, false
+	}
+	config, ok := target.Configurations[configName]
+	if !ok || len(config) == 0 {
+		return nil, false
+	}
+	raw, ok := config["outputPath"]
+	return raw, ok
+}
+
+func detectAngularOutputDir(ctx jsProjectContext) string {
+	base, browser, server := detectAngularOutputPaths(ctx)
+	if base == "" {
+		if server != "" {
+			server = strings.TrimRight(server, "/")
+			if strings.HasSuffix(server, "/server") {
+				base = strings.TrimSuffix(server, "/server")
+			} else {
+				base = path.Dir(server)
+			}
+		} else if browser != "" {
+			browser = strings.TrimRight(browser, "/")
+			if strings.HasSuffix(browser, "/browser") {
+				base = strings.TrimSuffix(browser, "/browser")
+			} else {
+				base = browser
+			}
+		}
+		base = normalizeAngularOutputDir(base)
+	}
+	return base
+}
+
+func detectAngularTargets(ctx jsProjectContext) (bool, bool, bool) {
+	cfg, projectName, _, ok := loadAngularConfig(ctx)
+	if !ok {
+		return false, false, false
+	}
+	project, ok := cfg.Projects[projectName]
+	if !ok {
+		return false, false, false
+	}
+	hasServer := false
+	if _, ok := project.Architect["server"]; ok {
+		hasServer = true
+	}
+	if _, ok := project.Targets["server"]; ok {
+		hasServer = true
+	}
+	hasPrerender := false
+	if _, ok := project.Architect["prerender"]; ok {
+		hasPrerender = true
+	}
+	if _, ok := project.Targets["prerender"]; ok {
+		hasPrerender = true
+	}
+	return hasServer, hasPrerender, true
+}
+
+func hasAngularSSRScript(metadata *nodePackageJSON) bool {
+	if metadata == nil || len(metadata.Scripts) == 0 {
+		return false
+	}
+	for _, name := range []string{"serve:ssr", "start:ssr", "ssr", "build:ssr"} {
+		if hasNodeScript(metadata.Scripts, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectAngularSSR(ctx jsProjectContext) bool {
+	hasServer, _, ok := detectAngularTargets(ctx)
+	if ok {
+		if hasServer {
+			return true
+		}
+		if hasAngularSSRScript(ctx.AppMetadata) {
+			return true
+		}
+		return false
+	}
+	if hasAngularSSRScript(ctx.AppMetadata) {
+		return true
+	}
+	if hasAnyPackage(ctx.AppMetadata, "@angular/platform-server", "@angular/ssr", "@nguniversal/express-engine", "@nguniversal/common", "@nguniversal/builders") ||
+		hasAnyPackage(ctx.RootMetadata, "@angular/platform-server", "@angular/ssr", "@nguniversal/express-engine", "@nguniversal/common", "@nguniversal/builders") {
+		return true
+	}
+	return false
+}
+
+func detectAngularStaticOutputDir(ctx jsProjectContext) string {
+	base, browser, _ := detectAngularOutputPaths(ctx)
+	outputDir := ""
+	if browser != "" {
+		outputDir = browser
+	} else if base != "" {
+		outputDir = base
+	}
+	if outputDir == "" {
+		outputDir = joinContainerPath(ctx.appWorkDir, "dist")
+	}
+	if browser == "" && base != "" {
+		if target, ok := detectAngularBuildTarget(ctx); ok {
+			builder := strings.ToLower(strings.TrimSpace(target.Builder))
+			if builder == "" {
+				builder = strings.ToLower(strings.TrimSpace(target.Executor))
+			}
+			if isAngularApplicationBuilder(builder) {
+				outputDir = joinContainerPath(base, "browser")
+			}
+		}
+	}
+	_, hasPrerender, _ := detectAngularTargets(ctx)
+	if hasPrerender && !strings.HasSuffix(outputDir, "/browser") {
+		return joinContainerPath(outputDir, "browser")
+	}
+	return outputDir
+}
+
+func detectAngularBuildTarget(ctx jsProjectContext) (angularTarget, bool) {
+	cfg, projectName, _, ok := loadAngularConfig(ctx)
+	if !ok {
+		return angularTarget{}, false
+	}
+	project, ok := cfg.Projects[projectName]
+	if !ok {
+		return angularTarget{}, false
+	}
+	target := project.Architect["build"]
+	if len(target.Options) == 0 {
+		target = project.Targets["build"]
+	}
+	if len(target.Options) == 0 && target.Builder == "" && target.Executor == "" {
+		return angularTarget{}, false
+	}
+	return target, true
+}
+
+func isAngularApplicationBuilder(builder string) bool {
+	return strings.Contains(builder, ":application")
+}
+
+func detectAngularRunCommand(ctx jsProjectContext, port string) string {
+	if strings.TrimSpace(port) == "" {
+		port = "4000"
+	}
+	if ctx.AppMetadata != nil {
+		for _, name := range []string{"serve:ssr", "start:ssr", "ssr", "serve:prod:ssr", "start:prod:ssr"} {
+			if hasNodeScript(ctx.AppMetadata.Scripts, name) {
+				return prefixCommand(ctx.appWorkDir, packageManagerScriptCommand(ctx.PackageManager, name))
+			}
+		}
+	}
+
+	outputDir := detectAngularOutputDir(ctx)
+	if outputDir == "" {
+		outputDir = joinContainerPath(ctx.appWorkDir, "dist")
+	}
+	serverDir := joinContainerPath(outputDir, "server")
+	mainMJS := joinContainerPath(serverDir, "main.mjs")
+	mainJS := joinContainerPath(serverDir, "main.js")
+	indexMJS := joinContainerPath(serverDir, "index.mjs")
+	indexJS := joinContainerPath(serverDir, "index.js")
+
+	quotedMainMJS := escapeSingleQuotes(mainMJS)
+	quotedMainJS := escapeSingleQuotes(mainJS)
+	quotedIndexMJS := escapeSingleQuotes(indexMJS)
+	quotedIndexJS := escapeSingleQuotes(indexJS)
+
+	fallback := fmt.Sprintf(
+		"if [ -f '%s' ]; then HOST=0.0.0.0 PORT=${PORT:-%s} node '%s'; "+
+			"elif [ -f '%s' ]; then HOST=0.0.0.0 PORT=${PORT:-%s} node '%s'; "+
+			"elif [ -f '%s' ]; then HOST=0.0.0.0 PORT=${PORT:-%s} node '%s'; "+
+			"else HOST=0.0.0.0 PORT=${PORT:-%s} node '%s'; fi",
+		quotedMainMJS, port, quotedMainMJS,
+		quotedMainJS, port, quotedMainJS,
+		quotedIndexMJS, port, quotedIndexMJS,
+		port, quotedIndexJS,
+	)
+	return prefixCommand(ctx.appWorkDir, fallback)
+}
+
+func pickAngularProject(cfg angularConfig, appDir string) string {
+	if cfg.DefaultProject != "" {
+		if _, ok := cfg.Projects[cfg.DefaultProject]; ok {
+			return cfg.DefaultProject
+		}
+	}
+	if len(cfg.Projects) == 1 {
+		for name := range cfg.Projects {
+			return name
+		}
+	}
+	appDir = strings.TrimSpace(strings.Trim(appDir, "/"))
+	if appDir == "" || appDir == "." {
+		for name, project := range cfg.Projects {
+			root := strings.TrimSpace(strings.Trim(project.Root, "/"))
+			if root == "" || root == "." {
+				return name
+			}
+		}
+		return ""
+	}
+	best := ""
+	bestLen := -1
+	for name, project := range cfg.Projects {
+		root := strings.TrimSpace(strings.Trim(project.Root, "/"))
+		if root == "" {
+			continue
+		}
+		if appDir == root || strings.HasPrefix(appDir, root+"/") {
+			if len(root) > bestLen {
+				best = name
+				bestLen = len(root)
+			}
+		}
+	}
+	return best
+}
+
+func normalizeAngularOutputDir(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "\"'`")
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, "\\", "/")
+	cleaned := path.Clean(value)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return ""
+	}
+	return cleaned
+}
+
+func parseAngularOutputPath(raw any) (string, string, string) {
+	switch value := raw.(type) {
+	case string:
+		return normalizeAngularOutputDir(value), "", ""
+	case map[string]any:
+		read := func(key string) string {
+			val, ok := value[key]
+			if !ok {
+				return ""
+			}
+			text, ok := val.(string)
+			if !ok {
+				return ""
+			}
+			return normalizeAngularOutputDir(text)
+		}
+		base := read("base")
+		browser := read("browser")
+		server := read("server")
+		if base == "" {
+			base = read("outputPath")
+			if base == "" {
+				base = read("path")
+			}
+		}
+		if browser == "" {
+			browser = read("browserOutputPath")
+		}
+		if server == "" {
+			server = read("serverOutputPath")
+		}
+		return base, browser, server
+	default:
+		return "", "", ""
+	}
+}
+
+func resolveAngularOutputPath(configRoot, output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" || output == "." {
+		return ""
+	}
+	configRoot = strings.TrimSpace(strings.Trim(configRoot, "/"))
+	if configRoot == "" || configRoot == "." {
+		return output
+	}
+	return joinContainerPath(configRoot, output)
+}
+
+func detectAstroOutputMode(ctx jsProjectContext) string {
+	for _, fileName := range []string{"astro.config.mjs", "astro.config.ts", "astro.config.js", "astro.config.cjs"} {
+		if mode := detectAstroOutputModeFromFile(filepath.Join(ctx.AppPath, fileName)); mode != "" {
+			return mode
+		}
+		if ctx.BuildContextPath != ctx.AppPath {
+			if mode := detectAstroOutputModeFromFile(filepath.Join(ctx.BuildContextPath, fileName)); mode != "" {
+				return mode
+			}
+		}
+	}
+	return ""
+}
+
+func detectAstroOutputModeFromFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	body := string(data)
+	pattern := regexp.MustCompile("(?m)\\boutput\\s*:\\s*['\"](server|hybrid|static)['\"]")
+	if matches := pattern.FindStringSubmatch(body); len(matches) == 2 {
+		return strings.ToLower(matches[1])
+	}
+	return ""
+}
+
+func detectAstroUsesNodeAdapter(ctx jsProjectContext) bool {
+	if hasAnyPackage(ctx.AppMetadata, "@astrojs/node") || hasAnyPackage(ctx.RootMetadata, "@astrojs/node") {
+		return true
+	}
+	for _, fileName := range []string{"astro.config.mjs", "astro.config.ts", "astro.config.js", "astro.config.cjs"} {
+		if hasAstroNodeAdapter(filepath.Join(ctx.AppPath, fileName)) {
+			return true
+		}
+		if ctx.BuildContextPath != ctx.AppPath {
+			if hasAstroNodeAdapter(filepath.Join(ctx.BuildContextPath, fileName)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasAstroNodeAdapter(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	lower := strings.ToLower(string(data))
+	return strings.Contains(lower, "@astrojs/node")
+}
+
+func detectAstroSSR(ctx jsProjectContext) bool {
+	mode := detectAstroOutputMode(ctx)
+	if mode == "server" || mode == "hybrid" {
+		return true
+	}
+	return detectAstroUsesNodeAdapter(ctx)
+}
+
+func detectAstroRunCommand(ctx jsProjectContext, port string) string {
+	if strings.TrimSpace(port) == "" {
+		port = "4321"
+	}
+	if ctx.AppMetadata != nil {
+		for _, name := range []string{"start", "serve", "start:ssr", "serve:ssr", "start:prod", "serve:prod"} {
+			body := strings.TrimSpace(ctx.AppMetadata.Scripts[name])
+			if body == "" {
+				continue
+			}
+			lower := strings.ToLower(body)
+			if strings.Contains(lower, "astro preview") || strings.Contains(lower, "astro dev") || strings.Contains(lower, "preview") {
+				continue
+			}
+			return prefixCommand(ctx.appWorkDir, packageManagerScriptCommand(ctx.PackageManager, name))
+		}
+	}
+	return prefixCommand(ctx.appWorkDir, fmt.Sprintf("HOST=0.0.0.0 PORT=${PORT:-%s} node ./dist/server/entry.mjs", port))
+}
+
+func detectRemixSSR(ctx jsProjectContext) bool {
+	for _, fileName := range []string{"react-router.config.ts", "react-router.config.js", "react-router.config.mjs", "react-router.config.cjs"} {
+		if enabled, ok := detectRemixSSRFromFile(filepath.Join(ctx.AppPath, fileName)); ok {
+			return enabled
+		}
+		if ctx.BuildContextPath != ctx.AppPath {
+			if enabled, ok := detectRemixSSRFromFile(filepath.Join(ctx.BuildContextPath, fileName)); ok {
+				return enabled
+			}
+		}
+	}
+	return true
+}
+
+func detectRemixSSRFromFile(path string) (bool, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, false
+	}
+	pattern := regexp.MustCompile("(?m)\\bssr\\s*:\\s*(true|false)\\b")
+	if matches := pattern.FindStringSubmatch(string(data)); len(matches) == 2 {
+		return strings.ToLower(matches[1]) == "true", true
+	}
+	return false, false
+}
+
+func detectRemixRunCommand(ctx jsProjectContext, port string) string {
+	if strings.TrimSpace(port) == "" {
+		port = "3000"
+	}
+	if ctx.AppMetadata != nil {
+		for _, name := range []string{"start", "start:prod", "start:production", "serve", "serve:prod", "prod", "production"} {
+			body := strings.TrimSpace(ctx.AppMetadata.Scripts[name])
+			if body == "" {
+				continue
+			}
+			lower := strings.ToLower(body)
+			if strings.Contains(lower, "dev") || strings.Contains(lower, "watch") {
+				continue
+			}
+			return prefixCommand(ctx.appWorkDir, packageManagerScriptCommand(ctx.PackageManager, name))
+		}
+	}
+	return prefixCommand(ctx.appWorkDir, fmt.Sprintf("HOST=0.0.0.0 PORT=${PORT:-%s} node ./build/server/index.js", port))
+}
+
+func detectSvelteKitAdapter(ctx jsProjectContext) string {
+	for _, fileName := range []string{"svelte.config.js", "svelte.config.mjs", "svelte.config.cjs", "svelte.config.ts"} {
+		if adapter := detectSvelteKitAdapterFromFile(filepath.Join(ctx.AppPath, fileName)); adapter != "" {
+			return adapter
+		}
+		if ctx.BuildContextPath != ctx.AppPath {
+			if adapter := detectSvelteKitAdapterFromFile(filepath.Join(ctx.BuildContextPath, fileName)); adapter != "" {
+				return adapter
+			}
+		}
+	}
+	return ""
+}
+
+func detectSvelteKitAdapterFromFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return detectSvelteKitAdapterFromConfig(string(data))
+}
+
+func detectSvelteKitAdapterFromConfig(configBody string) string {
+	lower := strings.ToLower(configBody)
+	switch {
+	case strings.Contains(lower, "adapter-static"):
+		return "static"
+	case strings.Contains(lower, "adapter-node"):
+		return "node"
+	case strings.Contains(lower, "adapter-auto"):
+		return "auto"
+	case strings.Contains(lower, "adapter-vercel"):
+		return "vercel"
+	case strings.Contains(lower, "adapter-netlify"):
+		return "netlify"
+	case strings.Contains(lower, "adapter-cloudflare-workers"):
+		return "cloudflare-workers"
+	case strings.Contains(lower, "adapter-cloudflare-pages"):
+		return "cloudflare-pages"
+	case strings.Contains(lower, "adapter-cloudflare"):
+		return "cloudflare"
+	case strings.Contains(lower, "adapter-aws"):
+		return "aws"
+	case strings.Contains(lower, "adapter-azure"):
+		return "azure"
+	case strings.Contains(lower, "adapter-deno"):
+		return "deno"
+	default:
+		return ""
+	}
+}
+
+func svelteKitPlatformAdapterReason(adapter string) (string, bool) {
+	switch adapter {
+	case "vercel", "netlify", "cloudflare", "cloudflare-workers", "cloudflare-pages", "aws", "azure", "deno":
+		return adapter, true
+	case "auto":
+		return "auto", true
+	default:
+		return "", false
+	}
+}
+
+func detectSvelteKitStaticOutputDir(ctx jsProjectContext) string {
+	if detectSvelteKitAdapter(ctx) != "static" {
+		return ""
+	}
+	for _, fileName := range []string{"svelte.config.js", "svelte.config.mjs", "svelte.config.cjs", "svelte.config.ts"} {
+		if outputDir := detectSvelteKitStaticOutputDirFromFile(filepath.Join(ctx.AppPath, fileName)); outputDir != "" {
+			return outputDir
+		}
+		if ctx.BuildContextPath != ctx.AppPath {
+			if outputDir := detectSvelteKitStaticOutputDirFromFile(filepath.Join(ctx.BuildContextPath, fileName)); outputDir != "" {
+				return outputDir
+			}
+		}
+	}
+	return ""
+}
+
+func detectSvelteKitStaticOutputDirFromFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return detectSvelteKitStaticOutputDirFromConfig(string(data))
+}
+
+func detectSvelteKitStaticOutputDirFromConfig(configBody string) string {
+	configBody = strings.TrimSpace(configBody)
+	if configBody == "" {
+		return ""
+	}
+
+	pagesPattern := regexp.MustCompile("(?m)\\bpages\\s*:\\s*['\"`]([^'\"`]+)['\"`]")
+	if matches := pagesPattern.FindStringSubmatch(configBody); len(matches) == 2 {
+		return normalizeSvelteKitOutputDir(matches[1])
+	}
+	assetsPattern := regexp.MustCompile("(?m)\\bassets\\s*:\\s*['\"`]([^'\"`]+)['\"`]")
+	if matches := assetsPattern.FindStringSubmatch(configBody); len(matches) == 2 {
+		return normalizeSvelteKitOutputDir(matches[1])
+	}
+	return ""
+}
+
+func normalizeSvelteKitOutputDir(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "\"'`")
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, "\\", "/")
+	cleaned := path.Clean(value)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return ""
+	}
+	return joinContainerPath("", cleaned)
 }
 
 func detectViteOutputDir(ctx jsProjectContext) string {
@@ -695,48 +1554,6 @@ func normalizeViteOutputDir(value string) string {
 	return cleaned
 }
 
-func detectJavaScriptRunCommand(ctx jsProjectContext, runScript string) string {
-	if runScript != "" {
-		return prefixCommand(ctx.appWorkDir, packageManagerScriptCommand(ctx.PackageManager, runScript))
-	}
-
-	if ctx.Runtime == "bun" {
-		for _, fileName := range []string{"server.ts", "server.js", "app.ts", "app.js"} {
-			if fileExists(filepath.Join(ctx.AppPath, fileName)) {
-				return prefixCommand(ctx.appWorkDir, "bun "+fileName)
-			}
-		}
-		return ""
-	}
-
-	for _, fileName := range []string{"server.js", "app.js", "main.js", "dist/server.js", "build/server.js"} {
-		if fileExists(filepath.Join(ctx.AppPath, filepath.FromSlash(fileName))) {
-			return prefixCommand(ctx.appWorkDir, "node "+fileName)
-		}
-	}
-	return ""
-}
-
-func packageManagerScriptCommand(packageManager, script string) string {
-	script = strings.TrimSpace(script)
-	if script == "" {
-		return ""
-	}
-
-	switch packageManager {
-	case "pnpm":
-		return "pnpm run " + script
-	case "yarn":
-		return "yarn " + script
-	case "bun":
-		return "bun run " + script
-	default:
-		if script == "start" {
-			return "npm start"
-		}
-		return "npm run " + script
-	}
-}
 
 func packageManagerAddCommand(packageManager, dependency string) string {
 	dependency = strings.TrimSpace(dependency)
@@ -754,127 +1571,4 @@ func packageManagerAddCommand(packageManager, dependency string) string {
 	default:
 		return "npm install " + dependency
 	}
-}
-
-func jsExecCommand(runtime, subcommand string) string {
-	subcommand = strings.TrimSpace(subcommand)
-	if runtime == "bun" {
-		return "bunx " + subcommand
-	}
-	return "npx " + subcommand
-}
-
-func prefixCommand(dir, cmd string) string {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		return ""
-	}
-	if dir == "" || dir == "." {
-		return cmd
-	}
-	return fmt.Sprintf("cd '%s' && %s", escapeSingleQuotes(dir), cmd)
-}
-
-func joinContainerPath(base, child string) string {
-	base = strings.TrimSpace(base)
-	child = strings.TrimSpace(child)
-	switch {
-	case base == "", base == ".":
-		return path.Clean(child)
-	case child == "", child == ".":
-		return path.Clean(base)
-	default:
-		return path.Clean(path.Join(base, child))
-	}
-}
-
-func appendUniqueString(values []string, extra string) []string {
-	extra = strings.TrimSpace(extra)
-	if extra == "" {
-		return values
-	}
-	for _, existing := range values {
-		if existing == extra {
-			return values
-		}
-	}
-	return append(values, extra)
-}
-
-func appendJavaScriptSystemPackages(values []string, extras ...string) []string {
-	for _, extra := range extras {
-		values = appendUniqueString(values, extra)
-	}
-	sort.Strings(values)
-	return values
-}
-
-func hasAnyPackage(metadata *nodePackageJSON, names ...string) bool {
-	if metadata == nil {
-		return false
-	}
-	for _, name := range names {
-		if _, ok := metadata.Dependencies[name]; ok {
-			return true
-		}
-		if _, ok := metadata.DevDependencies[name]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func detectJavaScriptSystemPackages(metadata *nodePackageJSON) []string {
-	if metadata == nil {
-		return nil
-	}
-
-	packages := make([]string, 0, 16)
-	add := func(names ...string) {
-		for _, name := range names {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			found := false
-			for _, existing := range packages {
-				if existing == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				packages = append(packages, name)
-			}
-		}
-	}
-
-	if hasAnyPackage(metadata, "@prisma/client", "prisma", "sharp", "canvas", "better-sqlite3", "sqlite3", "bcrypt", "argon2", "playwright", "@playwright/test", "puppeteer") {
-		add("ca-certificates", "git", "openssl", "python3", "make", "g++", "pkg-config")
-	}
-	if hasAnyPackage(metadata, "canvas") {
-		add("libcairo2-dev", "libpango1.0-dev", "libjpeg62-turbo-dev", "libgif-dev", "librsvg2-dev")
-	}
-	if hasAnyPackage(metadata, "playwright", "@playwright/test", "puppeteer") {
-		add(
-			"fonts-liberation",
-			"libasound2",
-			"libatk-bridge2.0-0",
-			"libatk1.0-0",
-			"libcups2",
-			"libdbus-1-3",
-			"libdrm2",
-			"libgbm1",
-			"libgtk-3-0",
-			"libnss3",
-			"libxcomposite1",
-			"libxdamage1",
-			"libxfixes3",
-			"libxkbcommon0",
-			"libxrandr2",
-		)
-	}
-
-	sort.Strings(packages)
-	return packages
 }
