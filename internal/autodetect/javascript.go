@@ -713,7 +713,12 @@ func selectJSRunScript(metadata *nodePackageJSON) string {
 		return ""
 	}
 
-	for _, name := range []string{"start", "start:prod", "start:production", "serve", "serve:prod", "prod", "production"} {
+	preferred := []string{"start", "start:prod", "start:production", "serve", "serve:prod", "prod", "production"}
+	if hasAnyPackage(metadata, "@nestjs/core") {
+		preferred = []string{"start:prod", "start:production", "start", "serve", "serve:prod", "prod", "production"}
+	}
+
+	for _, name := range preferred {
 		if isProductionRunScript(name, metadata.Scripts[name]) {
 			return name
 		}
