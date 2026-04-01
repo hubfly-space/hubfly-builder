@@ -2,9 +2,11 @@ package driver
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,6 +31,9 @@ type EphemeralBuildKitOpts struct {
 	RegistryPlainHTTP  bool
 	CacheDir           string
 	UseLocalCache      bool
+	CPULimit           float64
+	MemoryMB           int
+	UseSoftLimits      bool
 }
 
 type EphemeralBuildKit struct {
@@ -74,7 +79,7 @@ func StartEphemeralBuildKit(opts EphemeralBuildKitOpts) (*EphemeralBuildKit, err
 		}
 		cacheDir = absCacheDir
 	}
-	_, err = runDockerCommand(buildEphemeralBuildKitRunArgs(containerName, userNetwork, buildKitConfigPath, cacheDir, opts.UseLocalCache)...)
+	_, err = runDockerCommand(buildEphemeralBuildKitRunArgs(opts, containerName, buildKitConfigPath, cacheDir)...)
 	if err != nil {
 		if cleanupConfig != nil {
 			cleanupConfig()
@@ -189,20 +194,22 @@ func normalizeRegistryHost(registry string) string {
 	return strings.TrimSpace(registry)
 }
 
-func buildEphemeralBuildKitRunArgs(containerName, userNetwork, configPath string, cacheDir string, useLocalCache bool) []string {
+func buildEphemeralBuildKitRunArgs(opts EphemeralBuildKitOpts, containerName, configPath string, cacheDir string) []string {
 	args := []string{
 		"run", "-d", "--rm",
 		"--name", containerName,
 		"--privileged",
 		"--label", ephemeralBuildKitLabelKey + "=" + ephemeralBuildKitLabelValue,
-		"--network", userNetwork,
+		"--network", opts.UserNetwork,
 	}
-	if useLocalCache && strings.TrimSpace(cacheDir) != "" {
+	if opts.UseLocalCache && strings.TrimSpace(cacheDir) != "" {
 		args = append(args, "-v", cacheDir+":"+cacheDir)
 	}
 	if strings.TrimSpace(configPath) != "" {
 		args = append(args, "-v", configPath+":"+ephemeralBuildKitConfigMountPath+":ro")
 	}
+
+	args = appendResourceLimits(args, opts)
 	args = append(args, ephemeralBuildKitImage)
 	if strings.TrimSpace(configPath) != "" {
 		args = append(args, "--config", ephemeralBuildKitConfigMountPath)
@@ -213,6 +220,36 @@ func buildEphemeralBuildKitRunArgs(containerName, userNetwork, configPath string
 		"--oci-worker-net="+ephemeralBuildKitWorkerNetMode,
 		"--allow-insecure-entitlement="+ephemeralBuildKitHostEntitlement,
 	)
+	return args
+}
+
+func appendResourceLimits(args []string, opts EphemeralBuildKitOpts) []string {
+	cpu := opts.CPULimit
+	mem := opts.MemoryMB
+	if cpu <= 0 && mem <= 0 {
+		return args
+	}
+
+	if opts.UseSoftLimits {
+		if cpu > 0 {
+			shares := int(math.Round(cpu * 1024))
+			if shares < 2 {
+				shares = 2
+			}
+			args = append(args, "--cpu-shares", strconv.Itoa(shares))
+		}
+		if mem > 0 {
+			args = append(args, "--memory-reservation", fmt.Sprintf("%dm", mem))
+		}
+		return args
+	}
+
+	if cpu > 0 {
+		args = append(args, "--cpus", strconv.FormatFloat(cpu, 'f', -1, 64))
+	}
+	if mem > 0 {
+		args = append(args, "--memory", fmt.Sprintf("%dm", mem))
+	}
 	return args
 }
 

@@ -224,6 +224,14 @@ func (w *Worker) Run() error {
 	}
 
 	w.log("Starting ephemeral BuildKit daemon for network: %s", requestedNetwork)
+	limits := w.job.BuildConfig.ResourceLimits
+	useSoftLimits := limits.CPU > 0 || limits.MemoryMB > 0
+	cpuLimit := limits.CPU
+	memLimit := limits.MemoryMB
+	if !useSoftLimits {
+		cpuLimit = 2
+		memLimit = 4096
+	}
 	ephemeralSession, startErr := driver.StartEphemeralBuildKit(driver.EphemeralBuildKitOpts{
 		JobID:             w.job.ID,
 		UserNetwork:       requestedNetwork,
@@ -231,6 +239,9 @@ func (w *Worker) Run() error {
 		RegistryPlainHTTP: registryPlainHTTPFromEnv(),
 		CacheDir:          cacheDirFromEnv(),
 		UseLocalCache:     strings.EqualFold(cacheBackendFromEnv(), "local"),
+		CPULimit:          cpuLimit,
+		MemoryMB:          memLimit,
+		UseSoftLimits:     useSoftLimits,
 	})
 	if startErr != nil {
 		w.log("ERROR: failed to start ephemeral BuildKit daemon: %v", startErr)
