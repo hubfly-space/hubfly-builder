@@ -169,6 +169,7 @@ func pythonAllowedCommands() *allowlist.AllowedCommands {
 			"python manage.py runserver 0.0.0.0:${PORT:-8000}",
 			"python *.py",
 			"python -m *",
+			"hypercorn *:* --bind 0.0.0.0:${PORT:-8000}",
 			"uvicorn *:* --host 0.0.0.0 --port ${PORT:-8000}",
 			"uvicorn *:app --host 0.0.0.0 --port ${PORT:-8000}",
 			"uvicorn *:application --host 0.0.0.0 --port ${PORT:-8000}",
@@ -176,6 +177,32 @@ func pythonAllowedCommands() *allowlist.AllowedCommands {
 			"gunicorn *:app --bind 0.0.0.0:${PORT:-8000}",
 			"gunicorn *:application --bind 0.0.0.0:${PORT:-8000}",
 			"flask run --host=0.0.0.0 --port=${PORT:-8000}",
+		},
+	}
+}
+
+func elixirAllowedCommands() *allowlist.AllowedCommands {
+	return &allowlist.AllowedCommands{
+		Prebuild: []string{
+			"mix local.hex --force",
+			"mix local.rebar --force",
+			"MIX_ENV=prod mix deps.get",
+			"mix deps.get",
+		},
+		Build: []string{
+			"MIX_ENV=prod mix compile",
+			"MIX_ENV=prod mix assets.deploy",
+			"MIX_ENV=prod mix release",
+			"MIX_ENV=prod mix phx.digest",
+			"MIX_ENV=prod mix distillery.release --env=prod",
+			"touch rel/config.exs",
+		},
+		Run: []string{
+			"PHX_SERVER=true ./_build/prod/rel/*/bin/* start",
+			"./_build/prod/rel/*/bin/* start",
+			"MIX_ENV=prod mix phx.server",
+			"MIX_ENV=prod mix run --no-halt",
+			"mix ecto.setup && _build/prod/rel/*/bin/* foreground",
 		},
 	}
 }
@@ -205,6 +232,8 @@ func goAllowedCommands() *allowlist.AllowedCommands {
 func phpAllowedCommands() *allowlist.AllowedCommands {
 	return &allowlist.AllowedCommands{
 		Prebuild: []string{
+			"COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
+			"COMPOSER_ALLOW_SUPERUSER=1 composer install",
 			"composer install",
 			"composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
 		},
@@ -807,6 +836,187 @@ api = FastAPI()
 	}
 }
 
+func TestAutoDetectBuildConfigPythonFastAPIHypercorn(t *testing.T) {
+	repo := t.TempDir()
+	mainPy := `from fastapi import FastAPI
+
+app = FastAPI()
+`
+	if err := os.WriteFile(filepath.Join(repo, "main.py"), []byte(mainPy), 0o644); err != nil {
+		t.Fatalf("failed to write main.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "requirements.txt"), []byte("fastapi\nhypercorn\n"), 0o644); err != nil {
+		t.Fatalf("failed to write requirements.txt: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, pythonAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.PrebuildCommand != "pip install -r requirements.txt" {
+		t.Fatalf("expected pip install from requirements, got %q", cfg.PrebuildCommand)
+	}
+	if cfg.RunCommand != "hypercorn main:app --bind 0.0.0.0:${PORT:-8000}" {
+		t.Fatalf("expected hypercorn fastapi command, got %q", cfg.RunCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigElixirPhoenixRelease(t *testing.T) {
+	repo := t.TempDir()
+	mixExs := `defmodule Demo.MixProject do
+  use Mix.Project
+
+  def project do
+    [
+      app: :demo,
+      version: "0.1.0",
+      elixir: "~> 1.17",
+      releases: [demo: []]
+    ]
+  end
+
+  def application do
+    [
+      extra_applications: [:logger]
+    ]
+  end
+
+  defp deps do
+    [
+      {:phoenix, "~> 1.7"}
+    ]
+  end
+end
+`
+	if err := os.WriteFile(filepath.Join(repo, "mix.exs"), []byte(mixExs), 0o644); err != nil {
+		t.Fatalf("failed to write mix.exs: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, elixirAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Runtime != "elixir" {
+		t.Fatalf("expected runtime elixir, got %q", cfg.Runtime)
+	}
+	if cfg.Framework != "phoenix" {
+		t.Fatalf("expected phoenix framework, got %q", cfg.Framework)
+	}
+	if cfg.PrebuildCommand != "MIX_ENV=prod mix deps.get" {
+		t.Fatalf("expected mix deps prebuild, got %q", cfg.PrebuildCommand)
+	}
+	if cfg.BuildCommand != "MIX_ENV=prod mix release" {
+		t.Fatalf("expected mix release build, got %q", cfg.BuildCommand)
+	}
+	if cfg.RunCommand != "PHX_SERVER=true ./_build/prod/rel/demo/bin/demo start" {
+		t.Fatalf("expected phoenix release run command, got %q", cfg.RunCommand)
+	}
+	if cfg.ExposePort != "4000" {
+		t.Fatalf("expected elixir expose port 4000, got %q", cfg.ExposePort)
+	}
+}
+
+func TestAutoDetectBuildConfigElixirPhoenixFallback(t *testing.T) {
+	repo := t.TempDir()
+	mixExs := `defmodule Demo.MixProject do
+  use Mix.Project
+
+  def project do
+    [
+      app: :demo,
+      version: "0.1.0",
+      elixir: "~> 1.17"
+    ]
+  end
+
+  def application do
+    [
+      extra_applications: [:logger]
+    ]
+  end
+
+  defp deps do
+    [
+      {:phoenix, "~> 1.7"}
+    ]
+  end
+end
+`
+	if err := os.WriteFile(filepath.Join(repo, "mix.exs"), []byte(mixExs), 0o644); err != nil {
+		t.Fatalf("failed to write mix.exs: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, elixirAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Runtime != "elixir" {
+		t.Fatalf("expected runtime elixir, got %q", cfg.Runtime)
+	}
+	if cfg.Framework != "phoenix" {
+		t.Fatalf("expected phoenix framework, got %q", cfg.Framework)
+	}
+	if cfg.BuildCommand != "MIX_ENV=prod mix compile" {
+		t.Fatalf("expected mix compile build, got %q", cfg.BuildCommand)
+	}
+	if cfg.RunCommand != "MIX_ENV=prod mix phx.server" {
+		t.Fatalf("expected phoenix fallback run command, got %q", cfg.RunCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigElixirPhoenixDistillery(t *testing.T) {
+	repo := t.TempDir()
+	mixExs := `defmodule Demo.MixProject do
+  use Mix.Project
+
+  def project do
+    [
+      app: :demo,
+      version: "0.1.0",
+      elixir: "~> 1.17"
+    ]
+  end
+
+  def application do
+    [
+      extra_applications: [:logger]
+    ]
+  end
+
+  defp deps do
+    [
+      {:phoenix, "~> 1.7"},
+      {:distillery, "~> 2.1"}
+    ]
+  end
+end
+`
+	if err := os.WriteFile(filepath.Join(repo, "mix.exs"), []byte(mixExs), 0o644); err != nil {
+		t.Fatalf("failed to write mix.exs: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, elixirAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Runtime != "elixir" {
+		t.Fatalf("expected runtime elixir, got %q", cfg.Runtime)
+	}
+	if cfg.Framework != "phoenix" {
+		t.Fatalf("expected phoenix framework, got %q", cfg.Framework)
+	}
+	if cfg.BuildCommand != "MIX_ENV=prod mix distillery.release --env=prod" {
+		t.Fatalf("expected distillery release build, got %q", cfg.BuildCommand)
+	}
+	if cfg.RunCommand != "mix ecto.setup && _build/prod/rel/demo/bin/demo foreground" {
+		t.Fatalf("expected distillery foreground run command, got %q", cfg.RunCommand)
+	}
+}
+
 func TestAutoDetectBuildConfigPythonModuleEntrypoint(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repo, "myapp"), 0o755); err != nil {
@@ -1071,7 +1281,7 @@ func TestAutoDetectBuildConfigPHPLaravelUsesApacheRuntime(t *testing.T) {
 	if cfg.Framework != "laravel" {
 		t.Fatalf("expected laravel framework, got %q", cfg.Framework)
 	}
-	if cfg.PrebuildCommand != "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction" {
+	if cfg.PrebuildCommand != "COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction" {
 		t.Fatalf("expected composer install command, got %q", cfg.PrebuildCommand)
 	}
 	if cfg.BuildCommand != "php artisan optimize" {
@@ -1217,7 +1427,7 @@ func TestFinalizeBuildConfigWithOptionsSupportsManualPHPFPMMode(t *testing.T) {
 	cfg, err := FinalizeBuildConfigWithOptions(AutoDetectOptions{RepoRoot: repo}, BuildConfig{
 		Runtime:        "php",
 		Framework:      "symfony-nginx",
-		InstallCommand: "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
+		InstallCommand: "COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
 		RunCommand:     "php-fpm -D && exec nginx -g 'daemon off;'",
 		ExposePort:     "9090",
 	}, phpAllowedCommands())

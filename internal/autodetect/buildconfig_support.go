@@ -294,6 +294,13 @@ func manualRuntimeBuildPlan(appPath, runtime, version, appDir, buildContextDir s
 	case "python":
 		plan.AptPackages = detectPythonSystemPackages(appPath)
 		plan.SetupCommands = mergeUniqueCommands(detectPythonSetupCommands(appPath), plan.SetupCommands)
+	case "elixir":
+		if plan.RuntimeEnv == nil {
+			plan.RuntimeEnv = map[string]string{"MIX_ENV": "prod"}
+		}
+		if isPhoenixProject(appPath) {
+			plan.RuntimeEnv["PHX_SERVER"] = "true"
+		}
 	case "php":
 		if err := applyPHPPlanDefaults(appPath, &plan); err != nil {
 			return buildPlan{}, err
@@ -334,6 +341,14 @@ func manualRuntimeBuildPlan(appPath, runtime, version, appDir, buildContextDir s
 			}
 		}
 	}
+	if runtime == "elixir" {
+		if plan.RuntimeEnv == nil {
+			plan.RuntimeEnv = map[string]string{"MIX_ENV": "prod"}
+		}
+		if plan.ExposePort != "" {
+			plan.RuntimeEnv["PORT"] = plan.ExposePort
+		}
+	}
 
 	if runtime == "static" {
 		if strings.TrimSpace(plan.InstallCommand) != "" || len(plan.SetupCommands) > 0 || strings.TrimSpace(plan.BuildCommand) != "" || len(plan.PostBuildCommands) > 0 {
@@ -371,6 +386,23 @@ func detectCommandsWithoutAllowlist(repoPath, runtime string) (string, string, s
 		return pickFirstNonEmpty(pythonPrebuildCandidates(repoPath)),
 			pickFirstNonEmpty(pythonBuildCandidates(repoPath)),
 			pickFirstNonEmpty(pythonRunCandidates(repoPath))
+	case "elixir":
+		prebuildCandidates := []string{"MIX_ENV=prod mix deps.get", "mix deps.get"}
+		if isDistilleryProject(repoPath) {
+			prebuildCandidates = []string{"mix local.hex --force", "MIX_ENV=prod mix deps.get", "mix deps.get"}
+			buildCandidates := []string{"MIX_ENV=prod mix distillery.release --env=prod"}
+			return pickFirstNonEmpty(prebuildCandidates),
+				pickFirstNonEmpty(buildCandidates),
+				pickFirstNonEmpty(elixirDistilleryRunCandidates(repoPath))
+		}
+		hasRelease := hasElixirReleaseConfig(repoPath)
+		buildCandidates := []string{"MIX_ENV=prod mix compile"}
+		if hasRelease {
+			buildCandidates = []string{"MIX_ENV=prod mix release", "MIX_ENV=prod mix compile"}
+		}
+		return pickFirstNonEmpty(prebuildCandidates),
+			pickFirstNonEmpty(buildCandidates),
+			pickFirstNonEmpty(elixirRunCandidates(repoPath, hasRelease))
 	case "go":
 		prebuildCandidates := []string{"go mod download"}
 		if fileExists(filepath.Join(repoPath, "go.work")) {
@@ -390,6 +422,15 @@ func detectCommandsWithoutAllowlist(repoPath, runtime string) (string, string, s
 			buildCandidates = append([]string{"go build -o app " + entrypoint}, buildCandidates...)
 			runCandidates = append([]string{"./app", "go run " + entrypoint}, runCandidates...)
 		}
+		return pickFirstNonEmpty(prebuildCandidates), pickFirstNonEmpty(buildCandidates), pickFirstNonEmpty(runCandidates)
+	case "rust":
+		locked := fileExists(filepath.Join(repoPath, "Cargo.lock"))
+		prebuildCandidates := []string{"cargo fetch"}
+		buildCandidates := []string{"cargo build --release"}
+		if locked {
+			buildCandidates = []string{"cargo build --release --locked", "cargo build --release"}
+		}
+		runCandidates := []string{"./app"}
 		return pickFirstNonEmpty(prebuildCandidates), pickFirstNonEmpty(buildCandidates), pickFirstNonEmpty(runCandidates)
 	case "java":
 		isGradle := fileExists(filepath.Join(repoPath, "build.gradle")) || fileExists(filepath.Join(repoPath, "build.gradle.kts"))
@@ -470,6 +511,8 @@ func defaultVersionForRuntime(runtime string) string {
 		return "3.9"
 	case "go":
 		return "1.18"
+	case "rust":
+		return "stable"
 	case "php":
 		return "8.3"
 	case "java":

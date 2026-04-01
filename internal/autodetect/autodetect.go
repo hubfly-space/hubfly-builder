@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -75,14 +76,122 @@ func detectCommandsWithPath(repoPath string, runtime string, allowed *allowlist.
 			pickAllowed("bun run start", allowed.Run)
 	case "python":
 		return detectPythonCommands(repoPath, allowed)
+	case "elixir":
+		return detectElixirCommands(repoPath, allowed)
 	case "go":
 		return detectGoCommands(repoPath, allowed)
+	case "rust":
+		return detectRustCommands(repoPath, allowed)
 	case "php":
 		return detectPHPCommands(repoPath, allowed)
 	case "java":
 		return detectJavaCommands(repoPath, allowed)
 	}
 	return "", "", ""
+}
+
+func detectElixirCommands(repoPath string, allowed *allowlist.AllowedCommands) (string, string, string) {
+	prebuildCandidates := []string{"MIX_ENV=prod mix deps.get", "mix deps.get"}
+
+	if isDistilleryProject(repoPath) {
+		prebuildCandidates = []string{"mix local.hex --force", "MIX_ENV=prod mix deps.get", "mix deps.get"}
+		buildCandidates := []string{
+			"MIX_ENV=prod mix distillery.release --env=prod",
+		}
+		return pickFirstAllowed(prebuildCandidates, allowed.Prebuild),
+			pickFirstAllowed(buildCandidates, allowed.Build),
+			pickFirstAllowed(elixirDistilleryRunCandidates(repoPath), allowed.Run)
+	}
+
+	hasRelease := hasElixirReleaseConfig(repoPath)
+	if hasRelease {
+		buildCandidates := []string{"MIX_ENV=prod mix release", "MIX_ENV=prod mix compile"}
+		return pickFirstAllowed(prebuildCandidates, allowed.Prebuild),
+			pickFirstAllowed(buildCandidates, allowed.Build),
+			pickFirstAllowed(elixirRunCandidates(repoPath, true), allowed.Run)
+	}
+
+	buildCandidates := []string{"MIX_ENV=prod mix compile"}
+	return pickFirstAllowed(prebuildCandidates, allowed.Prebuild),
+		pickFirstAllowed(buildCandidates, allowed.Build),
+		pickFirstAllowed(elixirRunCandidates(repoPath, false), allowed.Run)
+}
+
+func elixirRunCandidates(repoPath string, preferRelease bool) []string {
+	runCandidates := []string{}
+	appName := detectElixirAppName(repoPath)
+	isPhoenix := isPhoenixProject(repoPath)
+	if preferRelease && appName != "" {
+		if isPhoenix {
+			runCandidates = append(runCandidates, fmt.Sprintf("PHX_SERVER=true ./_build/prod/rel/%s/bin/%s start", appName, appName))
+		}
+		runCandidates = append(runCandidates, fmt.Sprintf("./_build/prod/rel/%s/bin/%s start", appName, appName))
+	}
+	if isPhoenix {
+		runCandidates = append(runCandidates, "MIX_ENV=prod mix phx.server")
+	}
+	runCandidates = append(runCandidates, "MIX_ENV=prod mix run --no-halt")
+	return runCandidates
+}
+
+func elixirDistilleryRunCandidates(repoPath string) []string {
+	runCandidates := []string{}
+	appName := detectElixirAppName(repoPath)
+	if appName != "" {
+		runCandidates = append(runCandidates, fmt.Sprintf("mix ecto.setup && _build/prod/rel/%s/bin/%s foreground", appName, appName))
+	}
+	runCandidates = append(runCandidates, "MIX_ENV=prod mix run --no-halt")
+	return runCandidates
+}
+
+func hasElixirReleaseConfig(repoPath string) bool {
+	if repoPath == "" {
+		return false
+	}
+	if fileExists(filepath.Join(repoPath, "rel")) || fileExists(filepath.Join(repoPath, "config", "releases.exs")) {
+		return true
+	}
+	content := readFileLimited(filepath.Join(repoPath, "mix.exs"))
+	if content == "" {
+		return false
+	}
+	lower := strings.ToLower(content)
+	if strings.Contains(lower, "releases:") || strings.Contains(lower, "defp releases") || strings.Contains(lower, "def releases") {
+		return true
+	}
+	re := regexp.MustCompile(`(?m)^\s*releases:\s*\[`)
+	return re.MatchString(content)
+
+}
+
+func isDistilleryProject(repoPath string) bool {
+	if repoPath == "" {
+		return false
+	}
+	for _, path := range []string{"mix.exs", "mix.lock"} {
+		content := readFileLimited(filepath.Join(repoPath, path))
+		if content == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(content), "distillery") {
+			return true
+		}
+	}
+	return fileExists(filepath.Join(repoPath, "rel", "config.exs"))
+}
+
+func detectRustCommands(repoPath string, allowed *allowlist.AllowedCommands) (string, string, string) {
+	locked := repoPath != "" && fileExists(filepath.Join(repoPath, "Cargo.lock"))
+	prebuildCandidates := []string{"cargo fetch"}
+	buildCandidates := []string{"cargo build --release"}
+	if locked {
+		buildCandidates = []string{"cargo build --release --locked", "cargo build --release"}
+	}
+	runCandidates := []string{"./app"}
+
+	return pickFirstAllowed(prebuildCandidates, allowed.Prebuild),
+		pickFirstAllowed(buildCandidates, allowed.Build),
+		pickFirstAllowed(runCandidates, allowed.Run)
 }
 
 func detectGoCommands(repoPath string, allowed *allowlist.AllowedCommands) (string, string, string) {
@@ -348,19 +457,18 @@ func pythonRunCandidates(repoPath string) []string {
 		candidates = append(candidates, cmd)
 	}
 
-	if repoPath != "" && fileExists(filepath.Join(repoPath, "manage.py")) {
-		addCandidate("python manage.py runserver 0.0.0.0:${PORT:-8000}")
-		addCandidate("python manage.py")
+	if cmd := detectGunicornRunCommand(repoPath); cmd != "" {
+		addCandidate(cmd)
 	}
-
 	if cmd := detectASGIApplicationRunCommand(repoPath); cmd != "" {
 		addCandidate(cmd)
 	}
 	if cmd := detectFastAPIRunCommand(repoPath); cmd != "" {
 		addCandidate(cmd)
 	}
-	if cmd := detectGunicornRunCommand(repoPath); cmd != "" {
-		addCandidate(cmd)
+
+	if repoPath != "" && fileExists(filepath.Join(repoPath, "manage.py")) {
+		addCandidate("python manage.py runserver 0.0.0.0:${PORT:-8000}")
 	}
 
 	for _, file := range []string{"main.py", "app.py", "server.py", "run.py"} {
@@ -423,10 +531,36 @@ func detectFastAPIRunCommand(repoPath string) string {
 		if module == "" {
 			continue
 		}
+		if pythonDependencyPresent(repoPath, "hypercorn") {
+			return fmt.Sprintf("hypercorn %s:%s --bind 0.0.0.0:${PORT:-8000}", module, appName)
+		}
 		return fmt.Sprintf("uvicorn %s:%s --host 0.0.0.0 --port ${PORT:-8000}", module, appName)
 	}
 
 	return ""
+}
+
+func pythonDependencyPresent(repoPath, name string) bool {
+	if repoPath == "" || name == "" {
+		return false
+	}
+
+	needle := strings.ToLower(name)
+	for _, filename := range []string{"requirements.txt", "pyproject.toml", "setup.py", "setup.cfg"} {
+		fullPath := filepath.Join(repoPath, filename)
+		if !fileExists(fullPath) {
+			continue
+		}
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(string(content)), needle) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func detectASGIApplicationRunCommand(repoPath string) string {
@@ -597,6 +731,41 @@ func detectPythonMainModule(repoPath string) string {
 	}
 
 	return ""
+}
+
+func detectElixirAppName(repoPath string) string {
+	if repoPath == "" {
+		return ""
+	}
+	content := readFileLimited(filepath.Join(repoPath, "mix.exs"))
+	if content == "" {
+		return ""
+	}
+	re := regexp.MustCompile(`(?m)^\s*app:\s*:(\w+)`)
+	if match := re.FindStringSubmatch(content); len(match) == 2 {
+		return match[1]
+	}
+	return ""
+}
+
+func isPhoenixProject(repoPath string) bool {
+	if repoPath == "" {
+		return false
+	}
+	for _, path := range []string{"mix.exs", "mix.lock"} {
+		content := readFileLimited(filepath.Join(repoPath, path))
+		if content == "" {
+			continue
+		}
+		lower := strings.ToLower(content)
+		if strings.Contains(lower, "phoenix") && strings.Contains(lower, "phx") {
+			return true
+		}
+		if strings.Contains(lower, "phoenix") {
+			return true
+		}
+	}
+	return false
 }
 
 func isPythonIdentifier(value string) bool {
