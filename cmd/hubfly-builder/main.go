@@ -33,6 +33,11 @@ const (
 
 var version = "dev"
 
+const (
+	projectCacheRetentionDays = 30
+	sharedCacheRetentionDays  = 15
+)
+
 type EnvConfig struct {
 	BuildKitAddr string `json:"BUILDKIT_ADDR"`
 	BuildKitHost string `json:"BUILDKIT_HOST"`
@@ -119,6 +124,71 @@ func ensureBuildKitCacheDir() {
 	os.Setenv("BUILDKIT_CACHE_DIR", absCacheDir)
 }
 
+func cleanupBuildKitCacheDir() {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("BUILDKIT_CACHE_BACKEND"))) != "local" {
+		return
+	}
+
+	cacheDir := strings.TrimSpace(os.Getenv("BUILDKIT_CACHE_DIR"))
+	if cacheDir == "" {
+		return
+	}
+
+	base := filepath.Join(cacheDir, "hubfly-cache")
+	pruneSharedCache(filepath.Join(base, "shared"), time.Duration(sharedCacheRetentionDays)*24*time.Hour)
+	pruneProjectCache(base, time.Duration(projectCacheRetentionDays)*24*time.Hour)
+}
+
+func pruneSharedCache(sharedDir string, retention time.Duration) {
+	pruneChildDirs(sharedDir, retention)
+}
+
+func pruneProjectCache(baseDir string, retention time.Duration) {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("WARN: could not read cache directory %q: %v", baseDir, err)
+		}
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "shared" {
+			continue
+		}
+		userDir := filepath.Join(baseDir, entry.Name())
+		pruneChildDirs(userDir, retention)
+	}
+}
+
+func pruneChildDirs(root string, retention time.Duration) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("WARN: could not read cache directory %q: %v", root, err)
+		}
+		return
+	}
+
+	cutoff := time.Now().Add(-retention)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		fullPath := filepath.Join(root, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			log.Printf("WARN: could not stat cache directory %q: %v", fullPath, err)
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.RemoveAll(fullPath); err != nil {
+				log.Printf("WARN: could not remove cache directory %q: %v", fullPath, err)
+			}
+		}
+	}
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		_, _ = io.WriteString(os.Stdout, version+"\n")
@@ -128,6 +198,7 @@ func main() {
 	applyDefaultEnvConfig()
 	loadOptionalEnvConfig()
 	ensureBuildKitCacheDir()
+	cleanupBuildKitCacheDir()
 
 	registry := os.Getenv("REGISTRY_URL")
 	callbackURL := os.Getenv("CALLBACK_URL") // e.g., "http://localhost:3000/api/builds/callback"

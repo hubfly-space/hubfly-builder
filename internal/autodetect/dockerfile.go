@@ -411,16 +411,9 @@ func shouldUseMultiStage(plan buildPlan) bool {
 func runtimePruneCommand(plan buildPlan) string {
 	switch strings.TrimSpace(strings.ToLower(plan.Runtime)) {
 	case "node":
-		return "RUN rm -rf .git .next/cache .turbo .cache node_modules/.cache && " +
-			"if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then rm -rf node_modules && npm ci --omit=dev; " +
-			"elif [ -f pnpm-lock.yaml ]; then rm -rf node_modules && corepack enable && pnpm install --prod --frozen-lockfile; " +
-			"elif [ -f yarn.lock ]; then rm -rf node_modules && corepack enable && yarn install --production --frozen-lockfile; " +
-			"else npm prune --omit=dev || npm install --omit=dev; " +
-			"fi && rm -rf /root/.npm /root/.cache /tmp/*\n"
+		return ""
 	case "bun":
-		return "RUN rm -rf .git .next/cache .turbo .cache node_modules/.cache && " +
-			"if [ -f bun.lockb ] || [ -f bun.lock ]; then rm -rf node_modules && bun install --production --frozen-lockfile; " +
-			"fi && rm -rf /root/.bun /root/.cache /tmp/*\n"
+		return ""
 	default:
 		return ""
 	}

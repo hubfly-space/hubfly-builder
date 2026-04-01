@@ -2,6 +2,7 @@ package driver
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -74,7 +75,9 @@ func (bk *BuildKit) BuildCommand(opts BuildOpts) *exec.Cmd {
 		if cacheDir != "" {
 			for _, key := range normalizedCacheKeys(opts.CacheKeys) {
 				cachePath := filepath.Join(cacheDir, key)
-				args = append(args, "--import-cache", fmt.Sprintf("type=local,src=%s", cachePath))
+				if localCacheReady(cachePath) {
+					args = append(args, "--import-cache", fmt.Sprintf("type=local,src=%s", cachePath))
+				}
 				args = append(args, "--export-cache", fmt.Sprintf("type=local,dest=%s,mode=max", cachePath))
 			}
 		}
@@ -110,6 +113,14 @@ func normalizedCacheRefs(cacheRefs []string, legacyRef string) []string {
 	}
 	addRef(legacyRef)
 	return out
+}
+
+func localCacheReady(cachePath string) bool {
+	info, err := os.Stat(filepath.Join(cachePath, "index.json"))
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return true
 }
 
 func sortedMapKeys(values map[string]string) []string {
