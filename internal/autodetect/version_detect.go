@@ -20,6 +20,7 @@ var (
 	gradleJavaVersionPattern     = regexp.MustCompile(`JavaVersion\.VERSION_([0-9_]+)`)
 	gradleLanguageVersionPattern = regexp.MustCompile(`JavaLanguageVersion\.of\(\s*([0-9.]+)\s*\)`)
 	gradleCompatibilityPattern   = regexp.MustCompile(`(?m)^\s*(sourceCompatibility|targetCompatibility)\s*=?\s*['"]?([0-9.]+)`)
+	rustToolchainChannelPattern  = regexp.MustCompile(`(?m)^\s*channel\s*=\s*["']([^"']+)["']`)
 )
 
 func DetectRuntimeWithContext(repoRoot, appPath string) (string, string) {
@@ -48,8 +49,14 @@ func detectRuntimeByFiles(repoPath string) string {
 	if isPythonProject(repoPath) {
 		return "python"
 	}
+	if fileExists(filepath.Join(repoPath, "mix.exs")) {
+		return "elixir"
+	}
 	if fileExists(filepath.Join(repoPath, "go.mod")) {
 		return "go"
+	}
+	if fileExists(filepath.Join(repoPath, "Cargo.toml")) {
+		return "rust"
 	}
 	if fileExists(filepath.Join(repoPath, "composer.json")) {
 		return "php"
@@ -71,8 +78,12 @@ func detectVersionForRuntime(runtime, repoRoot, appPath string) string {
 		return detectBunVersion(repoRoot, appPath)
 	case "python":
 		return detectPythonVersion(repoRoot, appPath)
+	case "elixir":
+		return detectElixirVersion(repoRoot, appPath)
 	case "go":
 		return detectGoVersion(repoRoot, appPath)
+	case "rust":
+		return detectRustVersion(repoRoot, appPath)
 	case "php":
 		return detectPHPVersion(repoRoot, appPath)
 	case "java":
@@ -279,8 +290,12 @@ func defaultDetectedVersionForRuntime(runtime string) string {
 		return "22"
 	case "python":
 		return "3.9"
+	case "elixir":
+		return "1.17"
 	case "go":
 		return "1.18"
+	case "rust":
+		return "stable"
 	case "php":
 		return "8.3"
 	case "java":
@@ -290,6 +305,62 @@ func defaultDetectedVersionForRuntime(runtime string) string {
 	default:
 		return ""
 	}
+}
+
+func detectRustVersion(repoRoot, appPath string) string {
+	for _, base := range versionSearchPaths(appPath, repoRoot) {
+		if v := readRustToolchainFile(filepath.Join(base, "rust-toolchain.toml")); v != "" {
+			return v
+		}
+		if v := readFirstNonEmptyLine(filepath.Join(base, "rust-toolchain")); v != "" {
+			return strings.TrimSpace(v)
+		}
+		if v := readToolVersion(filepath.Join(base, ".tool-versions"), "rust"); v != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func detectElixirVersion(repoRoot, appPath string) string {
+	for _, base := range versionSearchPaths(appPath, repoRoot) {
+		if v := readFirstNonEmptyLine(filepath.Join(base, ".elixir-version")); v != "" {
+			return strings.TrimSpace(v)
+		}
+		if v := readToolVersion(filepath.Join(base, ".tool-versions"), "elixir"); v != "" {
+			return strings.TrimSpace(v)
+		}
+		if v := elixirVersionFromMixExs(filepath.Join(base, "mix.exs")); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func elixirVersionFromMixExs(path string) string {
+	data := readFileLimited(path)
+	if data == "" {
+		return ""
+	}
+
+	re := regexp.MustCompile(`(?m)^\s*elixir:\s*["']([^"']+)["']`)
+	if match := re.FindStringSubmatch(data); len(match) == 2 {
+		if v := semverishPattern.FindString(match[1]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func readRustToolchainFile(path string) string {
+	data := readFileLimited(path)
+	if data == "" {
+		return ""
+	}
+	if match := rustToolchainChannelPattern.FindStringSubmatch(data); len(match) == 2 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
 }
 
 func versionSearchPaths(appPath, repoRoot string) []string {
