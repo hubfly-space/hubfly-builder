@@ -529,33 +529,14 @@ func detectJavaScriptBootstrapCommands(ctx jsProjectContext) []string {
 }
 
 func detectJavaScriptInstallCommand(ctx jsProjectContext) string {
-	installPath := ctx.BuildContextPath
 	switch ctx.PackageManager {
 	case "bun":
-		if fileExists(filepath.Join(installPath, "bun.lock")) || fileExists(filepath.Join(installPath, "bun.lockb")) {
-			return "bun install --frozen-lockfile"
-		}
 		return "bun install"
 	case "pnpm":
-		if fileExists(filepath.Join(installPath, "pnpm-lock.yaml")) {
-			return "pnpm install --frozen-lockfile"
-		}
 		return "pnpm install"
 	case "yarn":
-		if fileExists(filepath.Join(installPath, ".yarnrc.yml")) {
-			if fileExists(filepath.Join(installPath, "yarn.lock")) {
-				return "yarn install --immutable"
-			}
-			return "yarn install"
-		}
-		if fileExists(filepath.Join(installPath, "yarn.lock")) {
-			return "yarn install --frozen-lockfile"
-		}
 		return "yarn install"
 	default:
-		if fileExists(filepath.Join(installPath, "package-lock.json")) || fileExists(filepath.Join(installPath, "npm-shrinkwrap.json")) {
-			return "npm ci"
-		}
 		return "npm install"
 	}
 }

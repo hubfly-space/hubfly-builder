@@ -890,7 +890,7 @@ func nodePrebuildCandidates(repoPath, packageManager string) []string {
 		return []string{"yarn install"}
 	default:
 		if repoPath != "" && (fileExists(filepath.Join(repoPath, "package-lock.json")) || fileExists(filepath.Join(repoPath, "npm-shrinkwrap.json"))) {
-			return []string{"npm ci", "npm install"}
+			return []string{"npm install", "npm ci"}
 		}
 		return []string{"npm install", "npm ci"}
 	}
