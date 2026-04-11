@@ -202,9 +202,6 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		builder.WriteString(argLines)
 	}
 	cacheMounts := buildCacheMounts(plan)
-	if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
-		builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
-	}
 	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
 		builder.WriteString(aptLine)
 	}
@@ -221,11 +218,15 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		builder.WriteString("COPY ")
 		builder.WriteString(strings.Join(depFiles, " "))
 		builder.WriteString(" ./\n\n")
-		for _, command := range []string{plan.InstallCommand} {
-			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
-				builder.WriteString(runLine)
-			}
+	installCaches := installCacheMounts(plan)
+	if len(installCaches) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+		builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
+	}
+	for _, command := range []string{plan.InstallCommand} {
+		if runLine := renderRunLineWithCaches(command, installCaches, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
 		}
+	}
 		for _, command := range preSetupCommands {
 			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
 				builder.WriteString(runLine)
@@ -234,11 +235,15 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		builder.WriteString("COPY . .\n\n")
 	} else {
 		builder.WriteString("COPY . .\n\n")
-		for _, command := range []string{plan.InstallCommand} {
-			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
-				builder.WriteString(runLine)
-			}
+	installCaches := installCacheMounts(plan)
+	if len(installCaches) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+		builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
+	}
+	for _, command := range []string{plan.InstallCommand} {
+		if runLine := renderRunLineWithCaches(command, installCaches, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
 		}
+	}
 		postSetupCommands = append(preSetupCommands, postSetupCommands...)
 	}
 	for _, command := range postSetupCommands {
@@ -247,6 +252,9 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		}
 	}
 	if runLine := renderRunLineWithCaches(plan.BuildCommand, cacheMounts, secretBuildKeys); runLine != "" {
+		if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+			builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
+		}
 		builder.WriteString(runLine)
 	}
 	for _, command := range plan.PostBuildCommands {
@@ -297,9 +305,6 @@ func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		builder.WriteString(argLines)
 	}
 	cacheMounts := buildCacheMounts(plan)
-	if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
-		builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
-	}
 	if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
 		builder.WriteString(aptLine)
 	}
@@ -316,8 +321,12 @@ func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		builder.WriteString("COPY ")
 		builder.WriteString(strings.Join(depFiles, " "))
 		builder.WriteString(" ./\n\n")
+		installCaches := installCacheMounts(plan)
+		if len(installCaches) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+			builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
+		}
 		for _, command := range []string{plan.InstallCommand} {
-			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			if runLine := renderRunLineWithCaches(command, installCaches, secretBuildKeys); runLine != "" {
 				builder.WriteString(runLine)
 			}
 		}
@@ -329,8 +338,12 @@ func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		builder.WriteString("COPY . .\n\n")
 	} else {
 		builder.WriteString("COPY . .\n\n")
+		installCaches := installCacheMounts(plan)
+		if len(installCaches) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+			builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
+		}
 		for _, command := range []string{plan.InstallCommand} {
-			if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			if runLine := renderRunLineWithCaches(command, installCaches, secretBuildKeys); runLine != "" {
 				builder.WriteString(runLine)
 			}
 		}
@@ -342,6 +355,9 @@ func renderSingleStageDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		}
 	}
 	if runLine := renderRunLineWithCaches(plan.BuildCommand, cacheMounts, secretBuildKeys); runLine != "" {
+		if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+			builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
+		}
 		builder.WriteString(runLine)
 	}
 	for _, command := range plan.PostBuildCommands {
@@ -412,6 +428,13 @@ func shouldUseMultiStage(plan buildPlan) bool {
 func runtimePruneCommand(plan buildPlan) string {
 	switch strings.TrimSpace(strings.ToLower(plan.Runtime)) {
 	case "node":
+		install := strings.ToLower(strings.TrimSpace(plan.InstallCommand))
+		if strings.HasPrefix(install, "npm ") {
+			return "RUN npm prune --omit=dev\n\n"
+		}
+		if strings.HasPrefix(install, "pnpm ") {
+			return "RUN pnpm prune --prod\n\n"
+		}
 		return ""
 	case "bun":
 		return ""
@@ -642,9 +665,6 @@ func renderStaticDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 			builder.WriteString(argLines)
 		}
 		cacheMounts := buildCacheMounts(plan)
-		if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
-			builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
-		}
 		if aptLine := renderAptInstallLine(plan.AptPackages); aptLine != "" {
 			builder.WriteString(aptLine)
 		}
@@ -682,6 +702,9 @@ func renderStaticDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 			}
 		}
 		if runLine := renderRunLineWithCaches(plan.BuildCommand, cacheMounts, secretBuildKeys); runLine != "" {
+			if len(cacheMounts) > 0 && !containsKey(buildArgKeys, "HBF_CACHE_ID") {
+				builder.WriteString("ARG HBF_CACHE_ID=default\n\n")
+			}
 			builder.WriteString(runLine)
 		}
 		for _, command := range plan.PostBuildCommands {
@@ -862,12 +885,50 @@ func buildCacheMounts(plan buildPlan) []cacheMount {
 	}
 }
 
+func installCacheMounts(plan buildPlan) []cacheMount {
+	command := strings.ToLower(strings.TrimSpace(plan.InstallCommand))
+	if command == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(command, "bun ") || strings.TrimSpace(plan.Runtime) == "bun" {
+		return []cacheMount{
+			cacheMountForTarget("/root/.bun/install/cache", cacheIDSuffix("bun-cache")),
+		}
+	}
+	if strings.HasPrefix(command, "npm ") {
+		return []cacheMount{
+			cacheMountForTarget("/root/.npm", cacheIDSuffix("npm-cache")),
+		}
+	}
+	if strings.HasPrefix(command, "pnpm ") {
+		return []cacheMount{
+			cacheMountForTarget("/root/.local/share/pnpm/store/v3", cacheIDSuffix("pnpm-store-v3")),
+			cacheMountForTarget("/root/.pnpm-store", cacheIDSuffix("pnpm-store")),
+		}
+	}
+	if strings.HasPrefix(command, "yarn ") {
+		return []cacheMount{
+			cacheMountForTarget("/root/.cache/yarn", cacheIDSuffix("yarn-cache")),
+			cacheMountForTarget("/usr/local/share/.cache/yarn", cacheIDSuffix("yarn-cache-global")),
+		}
+	}
+	return nil
+}
+
 func cacheMountFor(plan buildPlan, relPath, idSuffix string) cacheMount {
 	base := "/app"
 	target := joinContainerPath(joinContainerPath(base, plan.appWorkDir), relPath)
 	return cacheMount{
 		Target: target,
 		ID:     "${HBF_CACHE_ID}" + idSuffix,
+	}
+}
+
+func cacheMountForTarget(target, id string) cacheMount {
+	return cacheMount{
+		Target: strings.TrimSpace(target),
+		ID:     "${HBF_CACHE_ID}" + strings.TrimSpace(id),
 	}
 }
 

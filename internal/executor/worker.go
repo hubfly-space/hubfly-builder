@@ -489,6 +489,16 @@ func (w *Worker) commandOutput(cmd *exec.Cmd) (string, error) {
 }
 
 func (w *Worker) buildAndPushImage(activeBuildKit *driver.BuildKit, opts driver.BuildOpts) error {
+	opts.DirectPush = true
+	if opts.DirectPush {
+		w.log("Pushing image directly from BuildKit (no host export/load).")
+		buildCmd := activeBuildKit.BuildCommand(opts)
+		if err := w.executeCommand(buildCmd); err != nil {
+			return fmt.Errorf("buildctl push failed: %w", err)
+		}
+		return nil
+	}
+
 	exportDir, err := os.MkdirTemp("", fmt.Sprintf("hubfly-builder-image-%s-", w.job.ID))
 	if err != nil {
 		return fmt.Errorf("create image export directory: %w", err)

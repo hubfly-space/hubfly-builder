@@ -206,11 +206,7 @@ func detectJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version strin
 	plan.RuntimeEnv = map[string]string{"HOST": "0.0.0.0", "PORT": plan.ExposePort}
 	plan.RuntimeEnv["NODE_ENV"] = "production"
 
-	if packages := detectJavaScriptSystemPackages(ctx.AppMetadata); len(packages) > 0 {
-		plan.AptPackages = packages
-	}
 	if shouldAutoInstallNextSharp(ctx, framework) {
-		plan.AptPackages = appendJavaScriptSystemPackages(plan.AptPackages, "ca-certificates", "git", "openssl", "python3", "make", "g++", "pkg-config")
 		plan.ValidationWarnings = appendUniqueString(plan.ValidationWarnings, "Next.js app does not declare sharp; builder will install it for production image optimization")
 	}
 	plan.BootstrapCommands = detectJavaScriptBootstrapCommands(ctx)

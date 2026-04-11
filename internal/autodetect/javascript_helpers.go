@@ -71,58 +71,8 @@ func appendJavaScriptSystemPackages(values []string, extras ...string) []string 
 }
 
 func detectJavaScriptSystemPackages(metadata *nodePackageJSON) []string {
-	if metadata == nil {
-		return nil
-	}
-
-	packages := make([]string, 0, 16)
-	add := func(names ...string) {
-		for _, name := range names {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			found := false
-			for _, existing := range packages {
-				if existing == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				packages = append(packages, name)
-			}
-		}
-	}
-
-	if hasAnyPackage(metadata, "@prisma/client", "prisma", "sharp", "canvas", "better-sqlite3", "sqlite3", "bcrypt", "argon2", "playwright", "@playwright/test", "puppeteer") {
-		add("ca-certificates", "git", "openssl", "python3", "make", "g++", "pkg-config")
-	}
-	if hasAnyPackage(metadata, "canvas") {
-		add("libcairo2-dev", "libpango1.0-dev", "libjpeg62-turbo-dev", "libgif-dev", "librsvg2-dev")
-	}
-	if hasAnyPackage(metadata, "playwright", "@playwright/test", "puppeteer") {
-		add(
-			"fonts-liberation",
-			"libasound2",
-			"libatk-bridge2.0-0",
-			"libatk1.0-0",
-			"libcups2",
-			"libdbus-1-3",
-			"libdrm2",
-			"libgbm1",
-			"libgtk-3-0",
-			"libnss3",
-			"libxcomposite1",
-			"libxdamage1",
-			"libxfixes3",
-			"libxkbcommon0",
-			"libxrandr2",
-		)
-	}
-
-	sort.Strings(packages)
-	return packages
+	_ = metadata
+	return nil
 }
 
 func hasAnyPackage(metadata *nodePackageJSON, names ...string) bool {

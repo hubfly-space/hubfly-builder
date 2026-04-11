@@ -34,6 +34,7 @@ type BuildOpts struct {
 	DockerfilePath string
 	ImageTag       string
 	ExportPath     string
+	DirectPush     bool
 	BuildArgs      map[string]string
 	Secrets        []BuildSecret
 	CacheBackend   string
@@ -84,11 +85,15 @@ func (bk *BuildKit) BuildCommand(opts BuildOpts) *exec.Cmd {
 	default:
 		for _, cacheRef := range normalizedCacheRefs(opts.CacheRefs, opts.CacheRef) {
 			args = append(args, "--import-cache", fmt.Sprintf("type=registry,ref=%s", cacheRef))
-			args = append(args, "--export-cache", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
+			args = append(args, "--export-cache", fmt.Sprintf("type=registry,ref=%s,mode=min", cacheRef))
 		}
 	}
 
-	args = append(args, "--output", fmt.Sprintf("type=docker,name=%s,dest=%s", opts.ImageTag, opts.ExportPath))
+	if opts.DirectPush {
+		args = append(args, "--output", fmt.Sprintf("type=image,name=%s,push=true", opts.ImageTag))
+	} else {
+		args = append(args, "--output", fmt.Sprintf("type=docker,name=%s,dest=%s", opts.ImageTag, opts.ExportPath))
+	}
 	return exec.Command("buildctl", args...)
 }
 

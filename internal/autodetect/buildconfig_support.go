@@ -216,14 +216,13 @@ func manualJavaScriptBuildPlan(repoRoot, appDir, appPath, runtime, version, buil
 		RuntimeEnv: map[string]string{
 			"HOST": "0.0.0.0",
 		},
-		AptPackages: detectJavaScriptSystemPackages(ctx.AppMetadata),
+	AptPackages: nil,
 		appWorkDir:  ctx.appWorkDir,
 	}
 	if canInstallWithoutFullSource(ctx) {
 		plan.DependencyFiles = detectJavaScriptDependencyFiles(ctx)
 	}
 	if shouldAutoInstallNextSharp(ctx, framework) {
-		plan.AptPackages = appendJavaScriptSystemPackages(plan.AptPackages, "ca-certificates", "git", "openssl", "python3", "make", "g++", "pkg-config")
 		plan.ValidationWarnings = appendUniqueString(plan.ValidationWarnings, "Next.js app does not declare sharp; builder will install it for production image optimization")
 	}
 
