@@ -43,9 +43,6 @@ func detectRuntimeByFiles(repoPath string) string {
 	if fileExists(filepath.Join(repoPath, "bun.lock")) { // new version of bun is bun.lock
 		return "bun"
 	}
-	if fileExists(filepath.Join(repoPath, "package.json")) {
-		return "node"
-	}
 	if isPythonProject(repoPath) {
 		return "python"
 	}
@@ -58,8 +55,14 @@ func detectRuntimeByFiles(repoPath string) string {
 	if fileExists(filepath.Join(repoPath, "Cargo.toml")) {
 		return "rust"
 	}
-	if fileExists(filepath.Join(repoPath, "composer.json")) {
+	if isPHPProject(repoPath) {
 		return "php"
+	}
+	if fileExists(filepath.Join(repoPath, "package.json")) {
+		return "node"
+	}
+	if hasFileWithExtension(repoPath, ".csproj") {
+		return "dotnet"
 	}
 	if fileExists(filepath.Join(repoPath, "pom.xml")) || fileExists(filepath.Join(repoPath, "build.gradle")) || fileExists(filepath.Join(repoPath, "build.gradle.kts")) {
 		return "java"
@@ -68,6 +71,29 @@ func detectRuntimeByFiles(repoPath string) string {
 		return "static"
 	}
 	return "unknown"
+}
+
+func isPHPProject(repoPath string) bool {
+	if repoPath == "" {
+		return false
+	}
+	if fileExists(filepath.Join(repoPath, "composer.json")) || fileExists(filepath.Join(repoPath, "artisan")) {
+		return true
+	}
+	for _, rel := range []string{
+		"index.php",
+		"app.php",
+		"server.php",
+		"main.php",
+		"public/index.php",
+		"web/index.php",
+		"bin/console",
+	} {
+		if fileExists(filepath.Join(repoPath, filepath.FromSlash(rel))) {
+			return true
+		}
+	}
+	return false
 }
 
 func detectVersionForRuntime(runtime, repoRoot, appPath string) string {
@@ -86,6 +112,8 @@ func detectVersionForRuntime(runtime, repoRoot, appPath string) string {
 		return detectRustVersion(repoRoot, appPath)
 	case "php":
 		return detectPHPVersion(repoRoot, appPath)
+	case "dotnet":
+		return detectDotnetVersion(repoRoot, appPath)
 	case "java":
 		return detectJavaVersion(repoRoot, appPath)
 	case "static":
@@ -298,6 +326,8 @@ func defaultDetectedVersionForRuntime(runtime string) string {
 		return "stable"
 	case "php":
 		return "8.3"
+	case "dotnet":
+		return "9.0"
 	case "java":
 		return "21"
 	case "static":
@@ -332,6 +362,44 @@ func detectElixirVersion(repoRoot, appPath string) string {
 		}
 		if v := elixirVersionFromMixExs(filepath.Join(base, "mix.exs")); v != "" {
 			return v
+		}
+	}
+	return ""
+}
+
+func detectDotnetVersion(repoRoot, appPath string) string {
+	for _, base := range versionSearchPaths(appPath, repoRoot) {
+		if v := dotnetVersionFromGlobalJSON(filepath.Join(base, "global.json")); v != "" {
+			return v
+		}
+		if v := dotnetVersionFromCsproj(base); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func dotnetVersionFromGlobalJSON(path string) string {
+	data := readFileLimited(path)
+	if data == "" {
+		return ""
+	}
+	match := regexp.MustCompile(`"version"\s*:\s*"([^"]+)"`).FindStringSubmatch(data)
+	if len(match) != 2 {
+		return ""
+	}
+	return normalizeDotnetVersion(match[1])
+}
+
+func dotnetVersionFromCsproj(repoPath string) string {
+	for _, path := range findFilesWithExtension(repoPath, ".csproj") {
+		data := readFileLimited(path)
+		if data == "" {
+			continue
+		}
+		match := regexp.MustCompile(`<TargetFramework>\s*net([0-9.]+)\s*</TargetFramework>`).FindStringSubmatch(data)
+		if len(match) == 2 {
+			return normalizeDotnetVersion(match[1])
 		}
 	}
 	return ""
@@ -516,6 +584,21 @@ func normalizePHPVersion(raw string) string {
 	return raw
 }
 
+func normalizeDotnetVersion(raw string) string {
+	raw = normalizeVersionValue(raw)
+	if raw == "" {
+		return ""
+	}
+	if v := extractSemverish(raw); v != "" {
+		parts := strings.Split(v, ".")
+		if len(parts) >= 2 {
+			return parts[0] + "." + parts[1]
+		}
+		return parts[0] + ".0"
+	}
+	return raw
+}
+
 func normalizeVersionValue(raw string) string {
 	raw = strings.TrimSpace(raw)
 	raw = strings.Trim(raw, "\"'")
@@ -528,4 +611,29 @@ func extractSemverish(raw string) string {
 		return ""
 	}
 	return semverishPattern.FindString(raw)
+}
+
+func hasFileWithExtension(repoPath, ext string) bool {
+	return len(findFilesWithExtension(repoPath, ext)) > 0
+}
+
+func findFilesWithExtension(repoPath, ext string) []string {
+	if repoPath == "" || ext == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(repoPath)
+	if err != nil {
+		return nil
+	}
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if strings.HasSuffix(strings.ToLower(name), strings.ToLower(ext)) {
+			files = append(files, filepath.Join(repoPath, name))
+		}
+	}
+	return files
 }
