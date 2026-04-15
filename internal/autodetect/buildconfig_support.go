@@ -429,6 +429,16 @@ func detectCommandsWithoutAllowlist(repoPath, runtime string) (string, string, s
 		}
 		runCandidates := []string{"./app"}
 		return pickFirstNonEmpty(prebuildCandidates), pickFirstNonEmpty(buildCandidates), pickFirstNonEmpty(runCandidates)
+	case "dotnet":
+		projectName := detectDotnetProjectName(repoPath)
+		prebuildCandidates := []string{"dotnet restore"}
+		buildCandidates := []string{"dotnet publish -c Release -o out"}
+		runCandidates := []string{}
+		if projectName != "" {
+			runCandidates = append(runCandidates, "dotnet "+projectName+".dll")
+		}
+		runCandidates = append(runCandidates, "dotnet App.dll")
+		return pickFirstNonEmpty(prebuildCandidates), pickFirstNonEmpty(buildCandidates), pickFirstNonEmpty(runCandidates)
 	case "java":
 		isGradle := fileExists(filepath.Join(repoPath, "build.gradle")) || fileExists(filepath.Join(repoPath, "build.gradle.kts"))
 		hasMavenWrapper := fileExists(filepath.Join(repoPath, "mvnw"))
@@ -510,6 +520,8 @@ func defaultVersionForRuntime(runtime string) string {
 		return "1.18"
 	case "rust":
 		return "stable"
+	case "dotnet":
+		return "9.0"
 	case "php":
 		return "8.3"
 	case "java":

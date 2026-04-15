@@ -34,6 +34,7 @@ func DefaultAllowedCommands() *AllowedCommands {
 			"go mod download",
 			"cargo fetch",
 			"cargo chef prepare --recipe-path recipe.json",
+			"dotnet restore",
 			"bun install",
 			"bun install --frozen-lockfile",
 			"mix local.hex --force",
@@ -87,6 +88,7 @@ func DefaultAllowedCommands() *AllowedCommands {
 			"MIX_ENV=prod mix distillery.release --env=prod",
 			"touch rel/config.exs",
 			"python setup.py build",
+			"dotnet publish -c Release -o out",
 			"composer dump-autoload --optimize",
 			"php artisan optimize",
 			"php bin/console cache:clear --env=prod --no-debug",
@@ -169,6 +171,7 @@ func DefaultAllowedCommands() *AllowedCommands {
 			"java -jar build/quarkus-app/quarkus-run.jar",
 			"java -jar app.jar",
 			"java -jar build/libs/*-all.jar",
+			"dotnet *.dll",
 		},
 	}
 }

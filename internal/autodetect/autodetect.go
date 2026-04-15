@@ -82,6 +82,8 @@ func detectCommandsWithPath(repoPath string, runtime string, allowed *allowlist.
 		return detectGoCommands(repoPath, allowed)
 	case "rust":
 		return detectRustCommands(repoPath, allowed)
+	case "dotnet":
+		return detectDotnetCommands(repoPath, allowed)
 	case "php":
 		return detectPHPCommands(repoPath, allowed)
 	case "java":
@@ -221,6 +223,20 @@ func detectGoCommands(repoPath string, allowed *allowlist.AllowedCommands) (stri
 		pickFirstAllowed(runCandidates, allowed.Run)
 }
 
+func detectDotnetCommands(repoPath string, allowed *allowlist.AllowedCommands) (string, string, string) {
+	projectName := detectDotnetProjectName(repoPath)
+	prebuildCandidates := []string{"dotnet restore"}
+	buildCandidates := []string{"dotnet publish -c Release -o out"}
+	runCandidates := []string{}
+	if projectName != "" {
+		runCandidates = append(runCandidates, "dotnet "+projectName+".dll")
+	}
+	runCandidates = append(runCandidates, "dotnet App.dll")
+	return pickFirstAllowed(prebuildCandidates, allowed.Prebuild),
+		pickFirstAllowed(buildCandidates, allowed.Build),
+		pickFirstAllowed(runCandidates, allowed.Run)
+}
+
 func detectGoEntrypoint(repoPath string) string {
 	if repoPath == "" {
 		return ""
@@ -312,6 +328,43 @@ func discoverGoMainEntrypoints(repoPath string) []string {
 		return strings.ToLower(entrypoints[i]) < strings.ToLower(entrypoints[j])
 	})
 	return entrypoints
+}
+
+func detectGoDependencyFiles(repoPath string) []string {
+	if repoPath == "" {
+		return nil
+	}
+	files := make([]string, 0, 3)
+	for _, name := range []string{"go.mod", "go.sum", "go.work"} {
+		if fileExists(filepath.Join(repoPath, name)) {
+			files = append(files, name)
+		}
+	}
+	return files
+}
+
+func detectDotnetProjectName(repoPath string) string {
+	for _, path := range findFilesWithExtension(repoPath, ".csproj") {
+		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		name = strings.TrimSpace(name)
+		if name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func detectDotnetDependencyFiles(repoPath string) []string {
+	files := make([]string, 0, 3)
+	for _, path := range findFilesWithExtension(repoPath, ".csproj") {
+		files = append(files, filepath.Base(path))
+	}
+	for _, name := range []string{"Directory.Build.props", "Directory.Build.targets", "global.json", "NuGet.Config"} {
+		if fileExists(filepath.Join(repoPath, name)) {
+			files = append(files, name)
+		}
+	}
+	return files
 }
 
 func detectGoFramework(repoRoot, appPath string) string {

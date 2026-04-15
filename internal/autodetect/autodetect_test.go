@@ -229,6 +229,37 @@ func goAllowedCommands() *allowlist.AllowedCommands {
 	}
 }
 
+func dotnetAllowedCommands() *allowlist.AllowedCommands {
+	return &allowlist.AllowedCommands{
+		Prebuild: []string{
+			"dotnet restore",
+		},
+		Build: []string{
+			"dotnet publish -c Release -o out",
+		},
+		Run: []string{
+			"dotnet *.dll",
+		},
+	}
+}
+
+func rustAllowedCommands() *allowlist.AllowedCommands {
+	return &allowlist.AllowedCommands{
+		Prebuild: []string{
+			"cargo fetch",
+			"cargo chef prepare --recipe-path recipe.json",
+		},
+		Build: []string{
+			"cargo build --release --locked",
+			"cargo build --release",
+			"cargo chef cook --release --recipe-path recipe.json",
+		},
+		Run: []string{
+			"./app",
+		},
+	}
+}
+
 func phpAllowedCommands() *allowlist.AllowedCommands {
 	return &allowlist.AllowedCommands{
 		Prebuild: []string{
@@ -791,6 +822,144 @@ func TestAutoDetectBuildConfigWorkspaceUsesRootBuildContext(t *testing.T) {
 	}
 }
 
+func TestAutoDetectBuildConfigRustAxumSetsRuntimeEnvAndBinary(t *testing.T) {
+	repo := t.TempDir()
+	cargoToml := `[package]
+name = "hello-world"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+`
+	if err := os.WriteFile(filepath.Join(repo, "Cargo.toml"), []byte(cargoToml), 0o644); err != nil {
+		t.Fatalf("failed to write Cargo.toml: %v", err)
+	}
+	touchFile(t, repo, "Cargo.lock")
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatalf("failed to create src dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "src", "main.rs"), []byte("fn main() {}"), 0o644); err != nil {
+		t.Fatalf("failed to write main.rs: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, rustAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Framework != "axum" {
+		t.Fatalf("expected framework axum, got %q", cfg.Framework)
+	}
+	if cfg.ExposePort != "3000" {
+		t.Fatalf("expected axum port 3000, got %q", cfg.ExposePort)
+	}
+	if cfg.RunCommand != "./app" {
+		t.Fatalf("expected run command ./app, got %q", cfg.RunCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "ENV HOST=0.0.0.0") {
+		t.Fatalf("expected HOST env in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "ENV PORT=3000") {
+		t.Fatalf("expected PORT env in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "EXPOSE 3000") {
+		t.Fatalf("expected Dockerfile to expose 3000, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, `target/release/hello-world`) {
+		t.Fatalf("expected Dockerfile to copy named rust binary, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef") {
+		t.Fatalf("expected cargo-chef base stage, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "FROM chef AS planner") {
+		t.Fatalf("expected planner stage, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN cargo chef prepare --recipe-path recipe.json") {
+		t.Fatalf("expected cargo chef prepare step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "FROM chef AS builder") {
+		t.Fatalf("expected builder stage, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN cargo chef cook --release --recipe-path recipe.json") {
+		t.Fatalf("expected cargo chef cook step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY --from=builder /app/app /app/app") {
+		t.Fatalf("expected final image to copy compiled binary, got:\n%s", dockerfile)
+	}
+}
+
+func TestAutoDetectBuildConfigRustActixUsesCargoChef(t *testing.T) {
+	repo := t.TempDir()
+	cargoToml := `[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4"
+`
+	if err := os.WriteFile(filepath.Join(repo, "Cargo.toml"), []byte(cargoToml), 0o644); err != nil {
+		t.Fatalf("failed to write Cargo.toml: %v", err)
+	}
+	touchFile(t, repo, "Cargo.lock")
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatalf("failed to create src dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "src", "main.rs"), []byte("fn main() {}"), 0o644); err != nil {
+		t.Fatalf("failed to write main.rs: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, rustAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Framework != "actix-web" {
+		t.Fatalf("expected framework actix-web, got %q", cfg.Framework)
+	}
+	if cfg.ExposePort != "8080" {
+		t.Fatalf("expected actix-web port 8080, got %q", cfg.ExposePort)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM chef AS planner") {
+		t.Fatalf("expected planner stage, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN cargo chef prepare --recipe-path recipe.json") {
+		t.Fatalf("expected cargo chef prepare step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN cargo chef cook --release --recipe-path recipe.json") {
+		t.Fatalf("expected cargo chef cook step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "ENV HOST=0.0.0.0") {
+		t.Fatalf("expected HOST env in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "ENV PORT=8080") {
+		t.Fatalf("expected PORT env in Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY --from=builder /app/app /app/app") {
+		t.Fatalf("expected final image to copy compiled binary, got:\n%s", dockerfile)
+	}
+}
+
+func TestDetectRustBinaryNamePrefersDefaultRun(t *testing.T) {
+	repo := t.TempDir()
+	cargoToml := `[package]
+name = "workspace-root"
+default-run = "api-server"
+version = "0.1.0"
+`
+	if err := os.WriteFile(filepath.Join(repo, "Cargo.toml"), []byte(cargoToml), 0o644); err != nil {
+		t.Fatalf("failed to write Cargo.toml: %v", err)
+	}
+
+	if got := detectRustBinaryName(repo); got != "api-server" {
+		t.Fatalf("expected default-run binary api-server, got %q", got)
+	}
+}
+
 func TestAutoDetectBuildConfigPythonDjango(t *testing.T) {
 	repo := t.TempDir()
 	touchFile(t, repo, "requirements.txt")
@@ -859,6 +1028,22 @@ app = FastAPI()
 	}
 	if cfg.RunCommand != "hypercorn main:app --bind 0.0.0.0:${PORT:-8000}" {
 		t.Fatalf("expected hypercorn fastapi command, got %q", cfg.RunCommand)
+	}
+	if cfg.Framework != "fastapi" {
+		t.Fatalf("expected fastapi framework, got %q", cfg.Framework)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM python:3-alpine") {
+		t.Fatalf("expected alpine python base image, got:\n%s", dockerfile)
+	}
+	if strings.Contains(dockerfile, "FROM python:3-slim AS builder") {
+		t.Fatalf("did not expect multi-stage slim python Dockerfile, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY . .") {
+		t.Fatalf("expected source copy step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN pip install -r requirements.txt") {
+		t.Fatalf("expected requirements install step, got:\n%s", dockerfile)
 	}
 }
 
@@ -1014,6 +1199,48 @@ end
 	}
 	if cfg.RunCommand != "mix ecto.setup && _build/prod/rel/demo/bin/demo foreground" {
 		t.Fatalf("expected distillery foreground run command, got %q", cfg.RunCommand)
+	}
+}
+
+func TestAutoDetectBuildConfigPythonFlaskUsesSimpleDockerfile(t *testing.T) {
+	repo := t.TempDir()
+	mainPy := `from flask import Flask
+
+app = Flask(__name__)
+`
+	if err := os.WriteFile(filepath.Join(repo, "main.py"), []byte(mainPy), 0o644); err != nil {
+		t.Fatalf("failed to write main.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "requirements.txt"), []byte("flask\ngunicorn\n"), 0o644); err != nil {
+		t.Fatalf("failed to write requirements.txt: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, pythonAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Framework != "flask" {
+		t.Fatalf("expected flask framework, got %q", cfg.Framework)
+	}
+	if cfg.RunCommand != "gunicorn main:app --bind 0.0.0.0:${PORT:-8000}" {
+		t.Fatalf("expected flask gunicorn command, got %q", cfg.RunCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM python:3") {
+		t.Fatalf("expected python:3 base image, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "ENV PYTHONUNBUFFERED=1") {
+		t.Fatalf("expected PYTHONUNBUFFERED env, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY . ./") {
+		t.Fatalf("expected source copy step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN pip install -r requirements.txt") {
+		t.Fatalf("expected requirements install step, got:\n%s", dockerfile)
+	}
+	if strings.Contains(dockerfile, "FROM python:3-slim AS builder") {
+		t.Fatalf("did not expect multi-stage slim python Dockerfile, got:\n%s", dockerfile)
 	}
 }
 
@@ -1256,6 +1483,121 @@ func main() {}
 	}
 }
 
+func TestAutoDetectBuildConfigGoGinUsesSingleStageDockerfile(t *testing.T) {
+	repo := t.TempDir()
+	goMod := `module example.com/app
+
+go 1.23
+
+require github.com/gin-gonic/gin v1.10.0
+`
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte(goMod), 0o644); err != nil {
+		t.Fatalf("failed to write go.mod: %v", err)
+	}
+	touchFile(t, repo, "go.sum")
+	mainGo := `package main
+
+import "github.com/gin-gonic/gin"
+
+func main() {
+	r := gin.Default()
+	_ = r
+}
+`
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte(mainGo), 0o644); err != nil {
+		t.Fatalf("failed to write main.go: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, goAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Framework != "gin" {
+		t.Fatalf("expected framework gin, got %q", cfg.Framework)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if strings.Contains(dockerfile, "COPY --from=builder") {
+		t.Fatalf("did not expect multi-stage go runtime copy, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY go.mod go.sum ./") {
+		t.Fatalf("expected go dependency file copy, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN go mod download") {
+		t.Fatalf("expected go mod download step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN go build -o app .") {
+		t.Fatalf("expected go build step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "CMD exec ./app") {
+		t.Fatalf("expected app command, got:\n%s", dockerfile)
+	}
+}
+
+func TestAutoDetectBuildConfigDotnetAspNetCoreUsesRailwayStyleDockerfile(t *testing.T) {
+	repo := t.TempDir()
+	csproj := `<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+`
+	if err := os.WriteFile(filepath.Join(repo, "App.csproj"), []byte(csproj), 0o644); err != nil {
+		t.Fatalf("failed to write csproj: %v", err)
+	}
+	program := `var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+app.MapGet("/", () => "ok");
+app.Run();
+`
+	if err := os.WriteFile(filepath.Join(repo, "Program.cs"), []byte(program), 0o644); err != nil {
+		t.Fatalf("failed to write Program.cs: %v", err)
+	}
+
+	cfg, err := AutoDetectBuildConfig(repo, dotnetAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Runtime != "dotnet" {
+		t.Fatalf("expected runtime dotnet, got %q", cfg.Runtime)
+	}
+	if cfg.Framework != "aspnet-core" {
+		t.Fatalf("expected framework aspnet-core, got %q", cfg.Framework)
+	}
+	if cfg.PrebuildCommand != "dotnet restore" {
+		t.Fatalf("expected dotnet restore prebuild, got %q", cfg.PrebuildCommand)
+	}
+	if cfg.BuildCommand != "dotnet publish -c Release -o out" {
+		t.Fatalf("expected dotnet publish build, got %q", cfg.BuildCommand)
+	}
+	if cfg.RunCommand != "dotnet App.dll" {
+		t.Fatalf("expected dotnet App.dll run, got %q", cfg.RunCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build") {
+		t.Fatalf("expected dotnet sdk build stage, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY App.csproj ./") {
+		t.Fatalf("expected csproj copy step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN dotnet restore") {
+		t.Fatalf("expected restore step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "RUN dotnet publish -c Release -o out") {
+		t.Fatalf("expected publish step, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "FROM mcr.microsoft.com/dotnet/aspnet:9.0") {
+		t.Fatalf("expected aspnet runtime stage, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY --from=build /app/out ./") {
+		t.Fatalf("expected published output copy, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "ENTRYPOINT [\"dotnet\", \"App.dll\"]") {
+		t.Fatalf("expected dotnet entrypoint, got:\n%s", dockerfile)
+	}
+}
+
 func TestAutoDetectBuildConfigPHPLaravelUsesApacheRuntime(t *testing.T) {
 	repo := t.TempDir()
 	writeComposerJSON(t, repo, map[string]string{
@@ -1299,9 +1641,71 @@ func TestAutoDetectBuildConfigPHPLaravelUsesApacheRuntime(t *testing.T) {
 		"FROM php:8.3-apache",
 		"COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer",
 		"RUN a2enmod rewrite",
+		"/etc/apache2/conf-available/hubfly-docroot.conf",
+		"<Directory /app/public>",
+		"Require all granted",
+		"AllowOverride All",
+		"RUN a2enconf hubfly-docroot",
 		"RUN docker-php-ext-install intl opcache pdo_mysql",
 		"s!/var/www/html!/app/public!g",
 		"exec apache2-foreground",
+	} {
+		if !strings.Contains(dockerfile, snippet) {
+			t.Fatalf("expected Dockerfile to contain %q, got:\n%s", snippet, dockerfile)
+		}
+	}
+}
+
+func TestDetectRuntimePrefersPHPLaravelOverPackageJSON(t *testing.T) {
+	repo := t.TempDir()
+	writeComposerJSON(t, repo, map[string]string{
+		"laravel/framework": "^11.0",
+	})
+	writePackageJSONWithFields(t, repo, map[string]string{
+		"build": "vite build",
+	}, "", map[string]string{
+		"vite": "^5.0.0",
+	}, nil, nil)
+	touchFile(t, repo, "artisan")
+	if err := os.MkdirAll(filepath.Join(repo, "public"), 0o755); err != nil {
+		t.Fatalf("failed to create public dir: %v", err)
+	}
+	touchFile(t, filepath.Join(repo, "public"), "index.php")
+
+	runtime, _ := DetectRuntime(repo)
+	if runtime != "php" {
+		t.Fatalf("expected runtime php, got %q", runtime)
+	}
+}
+
+func TestAutoDetectBuildConfigRawPHPIndexUsesApacheRuntime(t *testing.T) {
+	repo := t.TempDir()
+	touchFile(t, repo, "index.php")
+
+	cfg, err := AutoDetectBuildConfig(repo, phpAllowedCommands())
+	if err != nil {
+		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
+	}
+
+	if cfg.Runtime != "php" {
+		t.Fatalf("expected runtime php, got %q", cfg.Runtime)
+	}
+	if cfg.Framework != "php-web" {
+		t.Fatalf("expected framework php-web, got %q", cfg.Framework)
+	}
+	if cfg.RunCommand != "apache2-foreground" {
+		t.Fatalf("expected apache runtime command, got %q", cfg.RunCommand)
+	}
+	dockerfile := string(cfg.DockerfileContent)
+	if !strings.Contains(dockerfile, "FROM php:8.3-apache") {
+		t.Fatalf("expected apache php image, got:\n%s", dockerfile)
+	}
+	for _, snippet := range []string{
+		"/etc/apache2/conf-available/hubfly-docroot.conf",
+		"<Directory /app>",
+		"Require all granted",
+		"AllowOverride All",
+		"RUN a2enconf hubfly-docroot",
 	} {
 		if !strings.Contains(dockerfile, snippet) {
 			t.Fatalf("expected Dockerfile to contain %q, got:\n%s", snippet, dockerfile)
