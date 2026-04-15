@@ -92,6 +92,22 @@ func detectBuildPlan(opts AutoDetectOptions, allowed *allowlist.AllowedCommands)
 		plan.BuildContextDir = appDir
 		plan.AppDir = appDir
 		plan.Framework = detectGoFramework(repoRoot, appPath)
+		plan.DependencyFiles = detectGoDependencyFiles(appPath)
+		plan.ExposePort = inferExposePort(defaultExposePort(runtime), run)
+		if err := validateBuildPlanCommands(plan, allowed); err != nil {
+			return buildPlan{}, err
+		}
+		return plan, nil
+	case "dotnet":
+		prebuild, build, run := detectCommandsWithPath(appPath, runtime, allowed)
+		plan, err := defaultBuildPlan(runtime, version, prebuild, build, run)
+		if err != nil {
+			return buildPlan{}, err
+		}
+		plan.BuildContextDir = appDir
+		plan.AppDir = appDir
+		plan.Framework = "aspnet-core"
+		plan.DependencyFiles = detectDotnetDependencyFiles(appPath)
 		plan.ExposePort = inferExposePort(defaultExposePort(runtime), run)
 		if err := validateBuildPlanCommands(plan, allowed); err != nil {
 			return buildPlan{}, err
@@ -145,12 +161,14 @@ func detectBuildPlan(opts AutoDetectOptions, allowed *allowlist.AllowedCommands)
 		}
 		if runtime == "rust" {
 			plan.Framework = detectRustFramework(appPath)
-			if plan.Framework == "axum" || plan.Framework == "rocket" {
+			if plan.Framework == "axum" || plan.Framework == "rocket" || plan.Framework == "actix-web" {
 				configureRustCargoChefPlan(&plan, appPath)
 			} else {
-				plan.PostBuildCommands = append(plan.PostBuildCommands, rustSelectBinaryCommand())
+				plan.PostBuildCommands = append(plan.PostBuildCommands, rustSelectBinaryCommand(detectRustBinaryName(appPath)))
 				plan.RunCommand = "./app"
 			}
+			plan.ExposePort = inferExposePort(defaultRustExposePort(plan.Framework), run)
+			plan.RuntimeEnv = rustRuntimeEnv(plan.Framework, plan.ExposePort)
 		}
 		if runtime == "java" {
 			plan.PostBuildCommands = append(plan.PostBuildCommands, javaSelectJarCommand())
@@ -158,7 +176,9 @@ func detectBuildPlan(opts AutoDetectOptions, allowed *allowlist.AllowedCommands)
 		}
 		plan.BuildContextDir = appDir
 		plan.AppDir = appDir
-		plan.ExposePort = inferExposePort(defaultExposePort(runtime), run)
+		if plan.ExposePort == "" {
+			plan.ExposePort = inferExposePort(defaultExposePort(runtime), run)
+		}
 		if err := validateBuildPlanCommands(plan, allowed); err != nil {
 			return buildPlan{}, err
 		}
@@ -357,7 +377,7 @@ func defaultExposePort(runtime string) string {
 	switch runtime {
 	case "python":
 		return "8000"
-	case "go", "java", "php", "rust":
+	case "go", "java", "php", "rust", "dotnet":
 		return "8080"
 	case "elixir":
 		return "4000"

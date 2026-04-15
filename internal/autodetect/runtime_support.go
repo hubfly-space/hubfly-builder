@@ -33,6 +33,7 @@ var (
 	trustedNodeFileRunPattern = regexp.MustCompile(`^node (server|app|main)\.js$`)
 	trustedNodeDistRunPattern = regexp.MustCompile(`^node (dist/server|dist/main|build/server|build/index|build/handler)\.js$`)
 	trustedBunFileRunPattern  = regexp.MustCompile(`^bun (server|app)\.(ts|js)$`)
+	trustedRustSelectPattern  = regexp.MustCompile(`^set -e; .*cp "\$[^"]+" /app/app.*$`)
 	trustedPHPIniPattern    = regexp.MustCompile(`^if \[ -f "\$PHP_INI_DIR/php\.ini-production" \]; then cp "\$PHP_INI_DIR/php\.ini-production" "\$PHP_INI_DIR/php\.ini"; fi$`)
 	trustedPHPExtPattern    = regexp.MustCompile(`^docker-php-ext-install(?: [a-z0-9_]+)+$`)
 	trustedPHPExtEnable     = regexp.MustCompile(`^docker-php-ext-enable(?: [a-z0-9_]+)+$`)
@@ -74,10 +75,49 @@ func detectPythonBuildPlan(appDir, appPath, version string, allowed *allowlist.A
 
 	plan.BuildContextDir = appDir
 	plan.AppDir = appDir
+	plan.Framework = detectPythonFramework(appPath)
 	plan.ExposePort = inferExposePort(plan.ExposePort, run)
 	plan.AptPackages = detectPythonSystemPackages(appPath)
 	plan.SetupCommands = detectPythonSetupCommands(appPath)
+	if shouldUseSimpleFastAPIDockerfile(plan) {
+		plan.BuilderImage = "python:" + version + "-alpine"
+		plan.RuntimeImage = plan.BuilderImage
+	}
 	return plan, nil
+}
+
+func detectPythonFramework(appPath string) string {
+	if detectFastAPIRunCommand(appPath) != "" {
+		return "fastapi"
+	}
+	if detectGunicornRunCommand(appPath) != "" {
+		return "flask"
+	}
+	return ""
+}
+
+func shouldUseSimpleFastAPIDockerfile(plan buildPlan) bool {
+	if strings.TrimSpace(strings.ToLower(plan.Framework)) != "fastapi" {
+		return false
+	}
+	if strings.TrimSpace(plan.InstallCommand) != "pip install -r requirements.txt" {
+		return false
+	}
+	return len(plan.AptPackages) == 0 && len(plan.SetupCommands) == 0 && strings.TrimSpace(plan.BuildCommand) == ""
+}
+
+func shouldUseSimpleFlaskDockerfile(plan buildPlan) bool {
+	if strings.TrimSpace(strings.ToLower(plan.Framework)) != "flask" {
+		return false
+	}
+	if strings.TrimSpace(plan.InstallCommand) != "pip install -r requirements.txt" {
+		return false
+	}
+	run := strings.TrimSpace(plan.RunCommand)
+	if !strings.HasPrefix(run, "gunicorn ") {
+		return false
+	}
+	return len(plan.AptPackages) == 0 && len(plan.SetupCommands) == 0 && strings.TrimSpace(plan.BuildCommand) == ""
 }
 
 func detectElixirBuildPlan(appDir, appPath, version string, allowed *allowlist.AllowedCommands) (buildPlan, error) {
@@ -325,7 +365,6 @@ func isTrustedGeneratedCommand(command string) bool {
 		"bun install --frozen-lockfile",
 		"python -m playwright install chromium",
 		javaSelectJarCommand(),
-		rustSelectBinaryCommand(),
 		laravelRuntimeInitCommand():
 		return true
 	}
@@ -347,6 +386,7 @@ func isTrustedGeneratedCommand(command string) bool {
 		trustedNodeFileRunPattern,
 		trustedNodeDistRunPattern,
 		trustedBunFileRunPattern,
+		trustedRustSelectPattern,
 		trustedPHPIniPattern,
 		trustedPHPExtPattern,
 		trustedPHPExtEnable,
