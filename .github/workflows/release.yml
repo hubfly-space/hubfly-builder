@@ -76,34 +76,34 @@ jobs:
           export ASSET_NAME
           export BIN_NAME
           python <<'PY'
-            import hashlib
-            import os
-            import pathlib
-            import tarfile
-            import zipfile
+          import hashlib
+          import os
+          import pathlib
+          import tarfile
+          import zipfile
 
-            asset_name = os.environ["ASSET_NAME"]
-            stage = pathlib.Path("stage")
-            dist = pathlib.Path("dist")
-            dist.mkdir(parents=True, exist_ok=True)
-            asset_path = dist / asset_name
+          asset_name = os.environ["ASSET_NAME"]
+          stage = pathlib.Path("stage")
+          dist = pathlib.Path("dist")
+          dist.mkdir(parents=True, exist_ok=True)
+          asset_path = dist / asset_name
 
-            if asset_name.endswith(".zip"):
-                with zipfile.ZipFile(asset_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for path in stage.rglob("*"):
-                        if path.is_file():
-                            zf.write(path, path.relative_to(stage))
-            else:
-                with tarfile.open(asset_path, "w:gz") as tf:
-                    for path in stage.rglob("*"):
-                        tf.add(path, arcname=path.relative_to(stage))
+          if asset_name.endswith(".zip"):
+              with zipfile.ZipFile(asset_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                  for path in stage.rglob("*"):
+                      if path.is_file():
+                          zf.write(path, path.relative_to(stage))
+          else:
+              with tarfile.open(asset_path, "w:gz") as tf:
+                  for path in stage.rglob("*"):
+                      tf.add(path, arcname=path.relative_to(stage))
 
-            digest = hashlib.sha256(asset_path.read_bytes()).hexdigest()
-            (dist / f"{asset_name}.sha256").write_text(
-                f"{digest}  {asset_name}\n",
-                encoding="utf-8",
-            )
-            PY
+          digest = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+          (dist / f"{asset_name}.sha256").write_text(
+              f"{digest}  {asset_name}\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
