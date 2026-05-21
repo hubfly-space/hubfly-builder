@@ -41,9 +41,6 @@ func FinalizeBuildConfigWithEnvOptions(opts AutoDetectOptions, cfg BuildConfig, 
 	if err != nil {
 		return BuildConfig{}, err
 	}
-	if err := validateBuildPlanCommands(plan, allowed); err != nil {
-		return BuildConfig{}, err
-	}
 	return buildConfigFromPlan(plan, false, buildArgKeys, secretBuildKeys)
 }
 

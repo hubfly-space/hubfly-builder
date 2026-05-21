@@ -843,8 +843,8 @@ func TestAutoDetectBuildConfigNextInstallsSharpWhenMissing(t *testing.T) {
 	if !strings.Contains(dockerfile, "RUN npm install sharp") {
 		t.Fatalf("expected Dockerfile to install sharp, got:\n%s", dockerfile)
 	}
-	if !strings.Contains(dockerfile, "apt-get install -y --no-install-recommends") {
-		t.Fatalf("expected Dockerfile to install native packages, got:\n%s", dockerfile)
+	if !strings.Contains(dockerfile, "COPY --from=builder /app/ /app/\n\nRUN npm install sharp") {
+		t.Fatalf("expected runtime stage to install sharp after copying app, got:\n%s", dockerfile)
 	}
 }
 

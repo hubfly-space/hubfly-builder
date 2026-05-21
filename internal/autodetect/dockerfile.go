@@ -372,6 +372,11 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 		builder.WriteString(aptLine)
 	}
 	builder.WriteString("COPY --from=builder /app/ /app/\n\n")
+	if command := runtimeSharpInstallCommand(plan); command != "" {
+		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
+			builder.WriteString(runLine)
+		}
+	}
 
 	if envLines := renderEnvLines(plan.RuntimeEnv); envLines != "" {
 		builder.WriteString("\n")
@@ -1058,6 +1063,19 @@ func splitSetupCommands(plan buildPlan) ([]string, []string) {
 		post = append(post, command)
 	}
 	return pre, post
+}
+
+func runtimeSharpInstallCommand(plan buildPlan) string {
+	if strings.TrimSpace(plan.Framework) != "next" {
+		return ""
+	}
+	for _, command := range plan.SetupCommands {
+		canonical := stripTrustedCommandPrefixes(command)
+		if trustedNextSharpPattern.MatchString(strings.TrimSpace(canonical)) {
+			return canonical
+		}
+	}
+	return ""
 }
 
 func renderCmdLine(command, initCommand string) string {
