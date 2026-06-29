@@ -50,6 +50,8 @@ type EnvConfig struct {
 	MaxConcurrentBuilds int    `json:"MAX_CONCURRENT_BUILDS"`
 	LogRetentionDays    int    `json:"LOG_RETENTION_DAYS"`
 	UpdateLockfile      string `json:"UPDATE_LOCKFILE"`
+	APIToken            string `json:"API_TOKEN"`
+	CallbackSecret      string `json:"CALLBACK_SECRET"`
 }
 
 func defaultEnvConfig() EnvConfig {
@@ -174,6 +176,12 @@ func mergeEnvConfig(dst *EnvConfig, src EnvConfig) {
 	if src.UpdateLockfile != "" {
 		dst.UpdateLockfile = src.UpdateLockfile
 	}
+	if src.APIToken != "" {
+		dst.APIToken = src.APIToken
+	}
+	if src.CallbackSecret != "" {
+		dst.CallbackSecret = src.CallbackSecret
+	}
 }
 
 func applyEnvironmentOverrides(config *EnvConfig) {
@@ -214,6 +222,12 @@ func applyEnvironmentOverrides(config *EnvConfig) {
 	}
 	if value := os.Getenv("UPDATE_LOCKFILE"); value != "" {
 		config.UpdateLockfile = value
+	}
+	if value := os.Getenv("API_TOKEN"); value != "" {
+		config.APIToken = value
+	}
+	if value := os.Getenv("CALLBACK_SECRET"); value != "" {
+		config.CallbackSecret = value
 	}
 }
 
@@ -270,8 +284,16 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stdout, systemLogFile))
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	log.Printf("System log file: %s", systemLogPath)
+	apiTokenDisplay := "not set"
+	if config.APIToken != "" {
+		apiTokenDisplay = "configured"
+	}
+	callbackSecretDisplay := "not set"
+	if config.CallbackSecret != "" {
+		callbackSecretDisplay = "configured"
+	}
 	log.Printf(
-		"Config: HUBCELL_BASE_URL=%q HUBCELL_CLI_PATH=%q CALLBACK_URL=%q SERVER_ADDR=%q UPLOAD_ADDR=%q DATA_DIR=%q LOG_DIR=%q MAX_CONCURRENT_BUILDS=%d LOG_RETENTION_DAYS=%d",
+		"Config: HUBCELL_BASE_URL=%q HUBCELL_CLI_PATH=%q CALLBACK_URL=%q SERVER_ADDR=%q UPLOAD_ADDR=%q DATA_DIR=%q LOG_DIR=%q MAX_CONCURRENT_BUILDS=%d LOG_RETENTION_DAYS=%d UPDATE_LOCKFILE=%s API_TOKEN=%s CALLBACK_SECRET=%s",
 		config.HubcellBaseURL,
 		config.HubcellCLIPath,
 		config.CallbackURL,
@@ -282,6 +304,8 @@ func main() {
 		config.MaxConcurrentBuilds,
 		config.LogRetentionDays,
 		config.UpdateLockfile,
+		apiTokenDisplay,
+		callbackSecretDisplay,
 	)
 	log.Printf("Effective: CALLBACK_URL=%q", callbackURL)
 
@@ -297,7 +321,7 @@ func main() {
 		}
 	}()
 
-	apiClient := api.NewClient(callbackURL)
+	apiClient := api.NewClient(callbackURL, config.CallbackSecret)
 	manager := executor.NewManager(storage, logManager, allowedCommands, apiClient, config.MaxConcurrentBuilds, config.UpdateLockfile)
 	go manager.Start()
 
@@ -309,7 +333,7 @@ func main() {
 		}
 	}()
 
-	server := server.NewServer(storage, logManager, manager, allowedCommands)
+	server := server.NewServer(storage, logManager, manager, allowedCommands, config.APIToken, callbackURL, config.CallbackSecret)
 
 	log.Printf("Server listening on %s", config.ServerAddr)
 	if err := server.Start(config.ServerAddr); err != nil {

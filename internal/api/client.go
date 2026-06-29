@@ -2,11 +2,16 @@ package api
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
-	"math/rand"
+	mathrand "math/rand"
 	"net/http"
 	"sort"
 	"strings"
@@ -16,33 +21,72 @@ import (
 )
 
 type Client struct {
-	httpClient  *http.Client
-	callbackURL string
+	httpClient     *http.Client
+	callbackURL    string
+	callbackSecret string
 }
 
-func NewClient(callbackURL string) *Client {
+func NewClient(callbackURL, callbackSecret string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		callbackURL: callbackURL,
+		callbackURL:    callbackURL,
+		callbackSecret: callbackSecret,
 	}
 }
 
-type ReportPayload struct {
-	ID              string    `json:"id"`
-	ProjectID       string    `json:"projectId"`
-	UserID          string    `json:"userId"`
-	Status          string    `json:"status"`
-	ImageTag        string    `json:"imageTag,omitempty"`
-	ExposePort      string    `json:"exposePort,omitempty"`
-	StartedAt       time.Time `json:"startedAt"`
-	FinishedAt      time.Time `json:"finishedAt"`
-	DurationSeconds float64   `json:"durationSeconds"`
-	LogPath         string    `json:"logPath"`
-	Error           string    `json:"error,omitempty"`
-	ResolvedEnvPlan []storage.ResolvedEnvVar `json:"resolvedEnvPlan,omitempty"`
-	RuntimeEnvKeys  []string                 `json:"runtimeEnvKeys,omitempty"`
+type runtimeBuildInspection struct {
+	BuildID       string  `json:"buildId"`
+	Status        string  `json:"status"`
+	ImageTag      string  `json:"imageTag,omitempty"`
+	CommitSha     string  `json:"commitSha,omitempty"`
+	Ref           string  `json:"ref,omitempty"`
+	StartedAt     string  `json:"startedAt,omitempty"`
+	FinishedAt    string  `json:"finishedAt,omitempty"`
+	DurationMs    *int64  `json:"durationMs,omitempty"`
+	Error         string  `json:"error,omitempty"`
+	ExitCode      *int64  `json:"exitCode,omitempty"`
+	ArtifactURL   string  `json:"artifactUrl,omitempty"`
+	BuilderVersion string `json:"builderVersion,omitempty"`
+}
+
+var builderStatusToGateway = map[string]string{
+	"pending":  "pending",
+	"claimed":  "building",
+	"building": "building",
+	"success":  "success",
+	"failed":   "failed",
+	"canceled": "cancelled",
+}
+
+func mapStatus(status string) string {
+	if mapped, ok := builderStatusToGateway[status]; ok {
+		return mapped
+	}
+	return status
+}
+
+func generateEventID() string {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("evt_%s", hex.EncodeToString(bytes))
+}
+
+func signPayload(secret, timestamp, eventID string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	signedPayload := fmt.Sprintf("%s.%s.%s", timestamp, eventID, string(body))
+	mac.Write([]byte(signedPayload))
+	return fmt.Sprintf("v1=%s", hex.EncodeToString(mac.Sum(nil)))
+}
+
+func nullTimeToRFC3339(nt sql.NullTime) string {
+	if nt.Valid {
+		return nt.Time.Format(time.RFC3339)
+	}
+	return ""
 }
 
 func (c *Client) ReportResult(job *storage.BuildJob, status, errorMsg string) error {
@@ -50,25 +94,30 @@ func (c *Client) ReportResult(job *storage.BuildJob, status, errorMsg string) er
 		return nil // No callback URL configured
 	}
 
-	payload := ReportPayload{
-		ID:         job.ID,
-		ProjectID:  job.ProjectID,
-		UserID:     job.UserID,
-		Status:     status,
-		ImageTag:   job.ImageTag,
-		ExposePort: callbackExposePort(job.BuildConfig),
-		LogPath:    job.LogPath,
-		Error:      errorMsg,
-		ResolvedEnvPlan: job.BuildConfig.ResolvedEnvPlan,
-		RuntimeEnvKeys:  runtimeEnvKeys(job.BuildConfig.ResolvedEnvPlan),
+	status = mapStatus(status)
+
+	inspection := runtimeBuildInspection{
+		BuildID:  job.ID,
+		Status:   status,
+		ImageTag: job.ImageTag,
+		CommitSha: job.SourceInfo.CommitSha,
+		Ref:      job.SourceInfo.Ref,
+		Error:    errorMsg,
 	}
 	if !job.StartedAt.Time.IsZero() {
-		payload.StartedAt = job.StartedAt.Time
-		payload.FinishedAt = time.Now()
-		payload.DurationSeconds = payload.FinishedAt.Sub(payload.StartedAt).Seconds()
+		inspection.StartedAt = job.StartedAt.Time.Format(time.RFC3339)
+		inspection.FinishedAt = time.Now().Format(time.RFC3339)
+		started := job.StartedAt.Time
+		finished := time.Now()
+		d := finished.Sub(started).Milliseconds()
+		inspection.DurationMs = &d
+	}
+	if job.ExitCode.Valid {
+		e := job.ExitCode.Int64
+		inspection.ExitCode = &e
 	}
 
-	body, err := json.Marshal(payload)
+	body, err := json.Marshal(inspection)
 	if err != nil {
 		return err
 	}
@@ -81,10 +130,8 @@ func (c *Client) ReportResult(job *storage.BuildJob, status, errorMsg string) er
 
 	for i := 0; i <= maxRetries; i++ {
 		if i > 0 {
-			// Exponential backoff: 2s, 4s, 8s, 16s, 32s
 			backoff := float64(baseDelay) * math.Pow(2, float64(i-1))
-			// Add jitter: +/- 20%
-			jitter := (rand.Float64() * 0.4) - 0.2
+			jitter := (mathrand.Float64() * 0.4) - 0.2
 			sleepDuration := time.Duration(backoff * (1 + jitter))
 			log.Printf("Retrying callback for job %s in %v (attempt %d/%d)", job.ID, sleepDuration, i, maxRetries)
 			time.Sleep(sleepDuration)
@@ -95,6 +142,16 @@ func (c *Client) ReportResult(job *storage.BuildJob, status, errorMsg string) er
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
+
+		if c.callbackSecret != "" {
+			eventID := generateEventID()
+			timestamp := fmt.Sprintf("%d", time.Now().Unix())
+			signature := signPayload(c.callbackSecret, timestamp, eventID, body)
+
+			req.Header.Set("x-hubfly-event-id", eventID)
+			req.Header.Set("x-hubfly-timestamp", timestamp)
+			req.Header.Set("x-hubfly-signature", signature)
+		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
