@@ -34,8 +34,6 @@ const (
 	defaultHubcellRootfsInitial = "10g"
 	defaultHubcellCPU           = 2.0
 	defaultHubcellMemoryMB      = 4096
-	buildNetworkRateBPS         = int64(800000000)
-	defaultNetworkRateBPS       = int64(15000000)
 )
 
 type Worker struct {
@@ -101,9 +99,6 @@ func (w *Worker) Run() error {
 		w.log("ERROR: no user network provided")
 		return w.failJob("no user network provided")
 	}
-	w.applyNetworkLimits(requestedNetwork, buildNetworkRateBPS, buildNetworkRateBPS)
-	defer w.applyNetworkLimits(requestedNetwork, defaultNetworkRateBPS, defaultNetworkRateBPS)
-
 	cloneCmd := w.execCommand("git", "clone", w.job.SourceInfo.GitRepository, w.workDir)
 	if err := w.executeCommand(cloneCmd); err != nil {
 		w.log("ERROR: failed to clone repository: %v", err)
@@ -631,28 +626,6 @@ func resolvedBuildEnvEntries(result envplan.Result) []string {
 		entries = append(entries, key+`="`+escapedValue+`"`)
 	}
 	return entries
-}
-
-func (w *Worker) applyNetworkLimits(networkName string, egressRateBPS, ingressRateBPS int64) {
-	networkName = strings.TrimSpace(networkName)
-	if networkName == "" {
-		return
-	}
-
-	cmd := w.execCommand(
-		"sudo",
-		driver.ResolveHubcellCLIPath(hubcellCLIPathFromEnv()),
-		"network",
-		"limits",
-		"--egress-rate-bps", fmt.Sprintf("%d", egressRateBPS),
-		"--ingress-rate-bps", fmt.Sprintf("%d", ingressRateBPS),
-		networkName,
-	)
-	if err := w.executeCommandWithoutLogging(cmd); err != nil {
-		w.log("WARNING: failed to apply network limits for %s: %v", networkName, err)
-		return
-	}
-	w.log("Applied network limits for %s: egressRateBPS=%d ingressRateBPS=%d", networkName, egressRateBPS, ingressRateBPS)
 }
 
 func (w *Worker) streamPipe(pipe io.Reader) {
