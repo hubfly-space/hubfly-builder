@@ -49,11 +49,17 @@ func createTables(db *sql.DB) error {
 			retry_count INT DEFAULT 0,
 			log_path TEXT,
 			last_checkpoint TEXT,
+			error_message TEXT DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME
 		)
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Migration: add error_message for databases created before this field existed.
+	_, _ = db.Exec(`ALTER TABLE build_jobs ADD COLUMN error_message TEXT DEFAULT ''`)
+	return nil
 }
 
 type SourceInfo struct {
@@ -176,6 +182,7 @@ type BuildJob struct {
 	RetryCount     int               `json:"retryCount"`
 	LogPath        string            `json:"logPath"`
 	LastCheckpoint string            `json:"lastCheckpoint"`
+	ErrorMessage   string            `json:"errorMessage"`
 	CreatedAt      time.Time         `json:"createdAt"`
 	UpdatedAt      time.Time         `json:"updatedAt"`
 }
@@ -187,9 +194,9 @@ func (s *Storage) CreateJob(job *BuildJob) error {
 	job.Status = "pending"
 
 	_, err := s.db.Exec(`
-		INSERT INTO build_jobs (id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, job.ID, job.ProjectID, job.UserID, job.SourceType, &job.SourceInfo, &job.BuildConfig, job.Status, job.ImageTag, job.StartedAt, job.FinishedAt, job.ExitCode, job.RetryCount, job.LogPath, job.LastCheckpoint, job.CreatedAt, job.UpdatedAt)
+		INSERT INTO build_jobs (id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, error_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.ProjectID, job.UserID, job.SourceType, &job.SourceInfo, &job.BuildConfig, job.Status, job.ImageTag, job.StartedAt, job.FinishedAt, job.ExitCode, job.RetryCount, job.LogPath, job.LastCheckpoint, job.ErrorMessage, job.CreatedAt, job.UpdatedAt)
 
 	return err
 }
@@ -198,9 +205,9 @@ func (s *Storage) GetJob(id string) (*BuildJob, error) {
 	job := &BuildJob{}
 
 	err := s.db.QueryRow(`
-		SELECT id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, created_at, updated_at
+		SELECT id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, error_message, created_at, updated_at
 		FROM build_jobs WHERE id = ?
-	`, id).Scan(&job.ID, &job.ProjectID, &job.UserID, &job.SourceType, &job.SourceInfo, &job.BuildConfig, &job.Status, &job.ImageTag, &job.StartedAt, &job.FinishedAt, &job.ExitCode, &job.RetryCount, &job.LogPath, &job.LastCheckpoint, &job.CreatedAt, &job.UpdatedAt)
+	`, id).Scan(&job.ID, &job.ProjectID, &job.UserID, &job.SourceType, &job.SourceInfo, &job.BuildConfig, &job.Status, &job.ImageTag, &job.StartedAt, &job.FinishedAt, &job.ExitCode, &job.RetryCount, &job.LogPath, &job.LastCheckpoint, &job.ErrorMessage, &job.CreatedAt, &job.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -213,9 +220,9 @@ func (s *Storage) GetPendingJob() (*BuildJob, error) {
 	job := &BuildJob{}
 
 	err := s.db.QueryRow(`
-		SELECT id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, created_at, updated_at
+		SELECT id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, error_message, created_at, updated_at
 		FROM build_jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1
-	`).Scan(&job.ID, &job.ProjectID, &job.UserID, &job.SourceType, &job.SourceInfo, &job.BuildConfig, &job.Status, &job.ImageTag, &job.StartedAt, &job.FinishedAt, &job.ExitCode, &job.RetryCount, &job.LogPath, &job.LastCheckpoint, &job.CreatedAt, &job.UpdatedAt)
+	`).Scan(&job.ID, &job.ProjectID, &job.UserID, &job.SourceType, &job.SourceInfo, &job.BuildConfig, &job.Status, &job.ImageTag, &job.StartedAt, &job.FinishedAt, &job.ExitCode, &job.RetryCount, &job.LogPath, &job.LastCheckpoint, &job.ErrorMessage, &job.CreatedAt, &job.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +235,7 @@ func (s *Storage) GetPendingJobExcludingUsers(excludeUserIDs []string) (*BuildJo
 	job := &BuildJob{}
 
 	baseQuery := `
-		SELECT id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, created_at, updated_at
+		SELECT id, project_id, user_id, source_type, source_info, build_config, status, image_tag, started_at, finished_at, exit_code, retry_count, log_path, last_checkpoint, error_message, created_at, updated_at
 		FROM build_jobs
 		WHERE status = 'pending' AND TRIM(IFNULL(user_id, '')) != ''
 	`
@@ -248,7 +255,7 @@ func (s *Storage) GetPendingJobExcludingUsers(excludeUserIDs []string) (*BuildJo
 
 	baseQuery += " ORDER BY created_at ASC LIMIT 1"
 
-	err := s.db.QueryRow(baseQuery, args...).Scan(&job.ID, &job.ProjectID, &job.UserID, &job.SourceType, &job.SourceInfo, &job.BuildConfig, &job.Status, &job.ImageTag, &job.StartedAt, &job.FinishedAt, &job.ExitCode, &job.RetryCount, &job.LogPath, &job.LastCheckpoint, &job.CreatedAt, &job.UpdatedAt)
+	err := s.db.QueryRow(baseQuery, args...).Scan(&job.ID, &job.ProjectID, &job.UserID, &job.SourceType, &job.SourceInfo, &job.BuildConfig, &job.Status, &job.ImageTag, &job.StartedAt, &job.FinishedAt, &job.ExitCode, &job.RetryCount, &job.LogPath, &job.LastCheckpoint, &job.ErrorMessage, &job.CreatedAt, &job.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +287,15 @@ func (s *Storage) UpdateJobBuildConfig(id string, buildConfig *BuildConfig) erro
 
 func (s *Storage) IncrementJobRetryCount(id string) error {
 	_, err := s.db.Exec(`UPDATE build_jobs SET retry_count = retry_count + 1, updated_at = ? WHERE id = ?`, time.Now(), id)
+	return err
+}
+
+func (s *Storage) UpdateJobFinishState(id, status, errorMessage string, exitCode sql.NullInt64) error {
+	now := time.Now()
+	_, err := s.db.Exec(
+		`UPDATE build_jobs SET status = ?, error_message = ?, finished_at = ?, exit_code = ?, updated_at = ? WHERE id = ?`,
+		status, errorMessage, now, exitCode, now, id,
+	)
 	return err
 }
 

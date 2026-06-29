@@ -1,7 +1,11 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"hubfly-builder/internal/allowlist"
@@ -30,16 +35,22 @@ type Server struct {
 	logManager *logs.LogManager
 	manager    *executor.Manager
 	allowlist  *allowlist.AllowedCommands
+	apiToken   string
+	callbackURL   string
+	callbackSecret string
 }
 
 var credentialURLPattern = regexp.MustCompile(`https?://[^@\s]+@`)
 
-func NewServer(storage *storage.Storage, logManager *logs.LogManager, manager *executor.Manager, allowlist *allowlist.AllowedCommands) *Server {
+func NewServer(storage *storage.Storage, logManager *logs.LogManager, manager *executor.Manager, allowlist *allowlist.AllowedCommands, apiToken string, callbackURL string, callbackSecret string) *Server {
 	return &Server{
 		storage:    storage,
 		logManager: logManager,
 		manager:    manager,
 		allowlist:  allowlist,
+		apiToken:   apiToken,
+		callbackURL:   callbackURL,
+		callbackSecret: callbackSecret,
 	}
 }
 
@@ -51,6 +62,11 @@ func (s *Server) Start(addr string) error {
 	r.HandleFunc("/dev/running-builds", s.GetRunningBuildsHandler).Methods("GET")
 	r.HandleFunc("/dev/reset-db", s.ResetDatabaseHandler).Methods("POST")
 	r.HandleFunc("/healthz", HealthCheckHandler).Methods("GET")
+
+	r.HandleFunc("/v1/regions/{regionId}/builds", s.authMiddleware(s.CreateBuildV1Handler)).Methods("POST")
+	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}", s.authMiddleware(s.GetBuildV1Handler)).Methods("GET")
+	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}/logs", s.authMiddleware(s.GetBuildLogsV1Handler)).Methods("GET")
+	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}/cancel", s.authMiddleware(s.CancelBuildV1Handler)).Methods("POST")
 
 	return http.ListenAndServe(addr, r)
 }
@@ -552,4 +568,402 @@ func copyStringMap(values map[string]string) map[string]string {
 		copied[key] = value
 	}
 	return copied
+}
+
+// ─── Gateway-compatible types ──────────────────────────────────────────────────
+
+type gatewaySubmitBuildSource struct {
+	Type       string `json:"type"`
+	Provider   string `json:"provider"`
+	Repository string `json:"repository"`
+	Ref        string `json:"ref"`
+	CommitSha  string `json:"commitSha,omitempty"`
+	WorkingDir string `json:"workingDir,omitempty"`
+}
+
+type gatewaySubmitBuildConfig struct {
+	IsAutoBuild        bool     `json:"isAutoBuild"`
+	Runtime            string   `json:"runtime,omitempty"`
+	Framework          string   `json:"framework,omitempty"`
+	Version            string   `json:"version,omitempty"`
+	InstallCommand     string   `json:"installCommand,omitempty"`
+	SetupCommands      []string `json:"setupCommands,omitempty"`
+	BuildCommand       string   `json:"buildCommand,omitempty"`
+	PostBuildCommands  []string `json:"postBuildCommands,omitempty"`
+	RuntimeInitCommand string   `json:"runtimeInitCommand,omitempty"`
+	RunCommand         string   `json:"runCommand"`
+	DockerfileContent  string   `json:"dockerfileContent,omitempty"`
+}
+
+type gatewayEnvironmentVar struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	Scope string `json:"scope"`
+}
+
+type gatewayResourceLimits struct {
+	CPU      float64 `json:"cpu"`
+	MemoryMB int     `json:"memoryMb"`
+}
+
+type gatewaySubmitBuildInput struct {
+	BuildID            string                   `json:"buildId"`
+	ProjectID          string                   `json:"projectId"`
+	UserID             string                   `json:"userId"`
+	RegionID           string                   `json:"regionId"`
+	ProjectNetworkName string                   `json:"projectNetworkName"`
+	Source             gatewaySubmitBuildSource `json:"source"`
+	Build              gatewaySubmitBuildConfig `json:"build"`
+	Environment        []gatewayEnvironmentVar  `json:"environment"`
+	TimeoutSeconds     int                      `json:"timeoutSeconds"`
+	ResourceLimits     gatewayResourceLimits    `json:"resourceLimits"`
+}
+
+type runtimeBuildInspection struct {
+	BuildID       string     `json:"buildId"`
+	Status        string     `json:"status"`
+	ImageTag      *string    `json:"imageTag"`
+	CommitSha     *string    `json:"commitSha"`
+	Ref           *string    `json:"ref"`
+	StartedAt     *time.Time `json:"startedAt"`
+	FinishedAt    *time.Time `json:"finishedAt"`
+	DurationMs    *int64     `json:"durationMs"`
+	Error         *string    `json:"error"`
+	ExitCode      *int64     `json:"exitCode"`
+	ArtifactURL   *string    `json:"artifactUrl"`
+	BuilderVersion *string   `json:"builderVersion"`
+}
+
+// ─── Auth middleware ───────────────────────────────────────────────────────────
+
+func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.apiToken == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "UNAUTHORIZED",
+				"message": "API token is not configured",
+			})
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != s.apiToken {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "UNAUTHORIZED",
+				"message": "invalid or missing API token",
+			})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// ─── Status mapping ────────────────────────────────────────────────────────────
+
+var builderStatusToGateway = map[string]string{
+	"pending":  "pending",
+	"claimed":  "building",
+	"building": "building",
+	"success":  "success",
+	"failed":   "failed",
+	"canceled": "cancelled",
+}
+
+func mapStatus(status string) string {
+	if mapped, ok := builderStatusToGateway[status]; ok {
+		return mapped
+	}
+	return status
+}
+
+// ─── V1 handlers ───────────────────────────────────────────────────────────────
+
+func (s *Server) CreateBuildV1Handler(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("ERROR: failed to read request body: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	var input gatewaySubmitBuildInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		log.Printf("ERROR: failed to decode request body: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": err.Error()})
+		return
+	}
+
+	if strings.TrimSpace(input.UserID) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": "userId is required"})
+		return
+	}
+	if strings.TrimSpace(input.ProjectNetworkName) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": "projectNetworkName is required"})
+		return
+	}
+	if strings.TrimSpace(input.Source.Repository) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": "source.repository is required"})
+		return
+	}
+
+	env := make(map[string]string)
+	for _, e := range input.Environment {
+		if e.Scope == "build" || e.Scope == "both" {
+			env[e.Key] = e.Value
+		}
+	}
+
+	job := &storage.BuildJob{
+		ID:        input.BuildID,
+		ProjectID: input.ProjectID,
+		UserID:    input.UserID,
+		SourceType: "git",
+		SourceInfo: storage.SourceInfo{
+			GitRepository: input.Source.Repository,
+			CommitSha:     input.Source.CommitSha,
+			Ref:           input.Source.Ref,
+			WorkingDir:    input.Source.WorkingDir,
+		},
+		BuildConfig: storage.BuildConfig{
+			IsAutoBuild:        input.Build.IsAutoBuild,
+			Runtime:            input.Build.Runtime,
+			Framework:          input.Build.Framework,
+			Version:            input.Build.Version,
+			InstallCommand:     input.Build.InstallCommand,
+			PrebuildCommand:    input.Build.InstallCommand,
+			SetupCommands:      input.Build.SetupCommands,
+			BuildCommand:       input.Build.BuildCommand,
+			PostBuildCommands:  input.Build.PostBuildCommands,
+			RunCommand:         input.Build.RunCommand,
+			RuntimeInitCommand: input.Build.RuntimeInitCommand,
+			Network:            input.ProjectNetworkName,
+			TimeoutSeconds:     input.TimeoutSeconds,
+			ResourceLimits: storage.ResourceLimits{
+				CPU:      input.ResourceLimits.CPU,
+				MemoryMB: input.ResourceLimits.MemoryMB,
+			},
+			Env:               env,
+			CustomDockerfile:  input.Build.DockerfileContent,
+		},
+		Env: env,
+	}
+	if input.Build.DockerfileContent != "" {
+		job.BuildConfig.CustomDockerfile = input.Build.DockerfileContent
+	}
+
+	log.Printf(
+		"Gateway create build: id=%s projectId=%s userId=%s repo=%s ref=%s network=%s autoBuild=%t",
+		job.ID, job.ProjectID, job.UserID,
+		sanitizeGitRepositoryURL(job.SourceInfo.GitRepository),
+		job.SourceInfo.Ref, job.BuildConfig.Network, job.BuildConfig.IsAutoBuild,
+	)
+
+	if err := s.storage.CreateJob(job); err != nil {
+		log.Printf("ERROR: failed to persist job %s: %v", job.ID, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	s.manager.SignalNewJob()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(buildJobToInspection(job))
+}
+
+func (s *Server) GetBuildV1Handler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	buildId := vars["buildId"]
+
+	job, err := s.storage.GetJob(buildId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "NOT_FOUND", "message": "build not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(buildJobToInspection(job))
+}
+
+func (s *Server) GetBuildLogsV1Handler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	buildId := vars["buildId"]
+
+	job, err := s.storage.GetJob(buildId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "NOT_FOUND", "message": "build not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	if job.LogPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "BUILD_LOG_NOT_FOUND", "message": "build log not found"})
+		return
+	}
+
+	logs, err := s.logManager.GetLog(job.LogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "BUILD_LOG_NOT_FOUND", "message": "build log not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write(logs)
+}
+
+func (s *Server) CancelBuildV1Handler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	buildId := vars["buildId"]
+
+	job, err := s.storage.GetJob(buildId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "NOT_FOUND", "message": "build not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	if job.Status != "pending" && job.Status != "claimed" && job.Status != "building" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":   "BUILD_STATE_CONFLICT",
+			"message": fmt.Sprintf("build cannot be cancelled while %s", job.Status),
+		})
+		return
+	}
+
+	if err := s.storage.UpdateJobStatus(buildId, "canceled"); err != nil {
+		log.Printf("ERROR: failed to cancel job %s: %v", buildId, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	log.Printf("Gateway cancel build: id=%s", buildId)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+
+func buildJobToInspection(job *storage.BuildJob) *runtimeBuildInspection {
+	status := mapStatus(job.Status)
+
+	var imageTag, commitSha, ref *string
+	if job.ImageTag != "" {
+		imageTag = &job.ImageTag
+	}
+	if job.SourceInfo.CommitSha != "" {
+		commitSha = &job.SourceInfo.CommitSha
+	}
+	if job.SourceInfo.Ref != "" {
+		ref = &job.SourceInfo.Ref
+	}
+
+	var startedAt, finishedAt *time.Time
+	if job.StartedAt.Valid {
+		startedAt = &job.StartedAt.Time
+	}
+	if job.FinishedAt.Valid {
+		finishedAt = &job.FinishedAt.Time
+	}
+
+	var durationMs *int64
+	if job.StartedAt.Valid && job.FinishedAt.Valid {
+		d := job.FinishedAt.Time.Sub(job.StartedAt.Time).Milliseconds()
+		durationMs = &d
+	}
+
+	var exitCode *int64
+	if job.ExitCode.Valid {
+		e := job.ExitCode.Int64
+		exitCode = &e
+	}
+
+	var errorStr *string
+	if job.ErrorMessage != "" {
+		errorStr = &job.ErrorMessage
+	}
+
+	return &runtimeBuildInspection{
+		BuildID:       job.ID,
+		Status:        status,
+		ImageTag:      imageTag,
+		CommitSha:     commitSha,
+		Ref:           ref,
+		StartedAt:     startedAt,
+		FinishedAt:    finishedAt,
+		DurationMs:    durationMs,
+		Error:         errorStr,
+		ExitCode:      exitCode,
+		ArtifactURL:   nil,
+		BuilderVersion: nil,
+	}
+}
+
+func generateEventID() string {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("evt_%s", hex.EncodeToString(bytes))
+}
+
+func signPayload(secret, timestamp, eventID string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	signedPayload := fmt.Sprintf("%s.%s.%s", timestamp, eventID, string(body))
+	mac.Write([]byte(signedPayload))
+	return fmt.Sprintf("v1=%s", hex.EncodeToString(mac.Sum(nil)))
 }

@@ -435,8 +435,11 @@ func (w *Worker) Run() error {
 
 func (w *Worker) failJob(reason string) error {
 	log.Printf("Failing job %s: %s", w.job.ID, reason)
-	if err := w.storage.UpdateJobStatus(w.job.ID, "failed"); err != nil {
-		log.Printf("ERROR: could not update job status to 'failed' for job %s: %v", w.job.ID, err)
+	now := time.Now()
+	w.job.FinishedAt = sql.NullTime{Time: now, Valid: true}
+	w.job.ErrorMessage = reason
+	if err := w.storage.UpdateJobFinishState(w.job.ID, "failed", reason, w.job.ExitCode); err != nil {
+		log.Printf("ERROR: could not update finish state for job %s: %v", w.job.ID, err)
 	}
 	if err := w.apiClient.ReportResult(w.job, "failed", reason); err != nil {
 		log.Printf("ERROR: could not report result to backend for job %s: %v", w.job.ID, err)
@@ -446,8 +449,11 @@ func (w *Worker) failJob(reason string) error {
 
 func (w *Worker) succeedJob() error {
 	log.Printf("Succeeding job %s", w.job.ID)
-	if err := w.storage.UpdateJobStatus(w.job.ID, "success"); err != nil {
-		log.Printf("ERROR: could not update status to 'success' for job %s: %v", w.job.ID, err)
+	now := time.Now()
+	w.job.FinishedAt = sql.NullTime{Time: now, Valid: true}
+	w.job.ExitCode = sql.NullInt64{Int64: 0, Valid: true}
+	if err := w.storage.UpdateJobFinishState(w.job.ID, "success", "", w.job.ExitCode); err != nil {
+		log.Printf("ERROR: could not update finish state for job %s: %v", w.job.ID, err)
 		return err
 	}
 	if err := w.apiClient.ReportResult(w.job, "success", ""); err != nil {
