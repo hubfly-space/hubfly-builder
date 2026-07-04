@@ -35,20 +35,18 @@ type Server struct {
 	logManager *logs.LogManager
 	manager    *executor.Manager
 	allowlist  *allowlist.AllowedCommands
-	apiToken   string
 	callbackURL   string
 	callbackSecret string
 }
 
 var credentialURLPattern = regexp.MustCompile(`https?://[^@\s]+@`)
 
-func NewServer(storage *storage.Storage, logManager *logs.LogManager, manager *executor.Manager, allowlist *allowlist.AllowedCommands, apiToken string, callbackURL string, callbackSecret string) *Server {
+func NewServer(storage *storage.Storage, logManager *logs.LogManager, manager *executor.Manager, allowlist *allowlist.AllowedCommands, callbackURL string, callbackSecret string) *Server {
 	return &Server{
 		storage:    storage,
 		logManager: logManager,
 		manager:    manager,
 		allowlist:  allowlist,
-		apiToken:   apiToken,
 		callbackURL:   callbackURL,
 		callbackSecret: callbackSecret,
 	}
@@ -63,10 +61,10 @@ func (s *Server) Start(addr string) error {
 	r.HandleFunc("/dev/reset-db", s.ResetDatabaseHandler).Methods("POST")
 	r.HandleFunc("/healthz", HealthCheckHandler).Methods("GET")
 
-	r.HandleFunc("/v1/regions/{regionId}/builds", s.authMiddleware(s.CreateBuildV1Handler)).Methods("POST")
-	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}", s.authMiddleware(s.GetBuildV1Handler)).Methods("GET")
-	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}/logs", s.authMiddleware(s.GetBuildLogsV1Handler)).Methods("GET")
-	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}/cancel", s.authMiddleware(s.CancelBuildV1Handler)).Methods("POST")
+	r.HandleFunc("/v1/regions/{regionId}/builds", s.CreateBuildV1Handler).Methods("POST")
+	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}", s.GetBuildV1Handler).Methods("GET")
+	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}/logs", s.GetBuildLogsV1Handler).Methods("GET")
+	r.HandleFunc("/v1/regions/{regionId}/builds/{buildId}/cancel", s.CancelBuildV1Handler).Methods("POST")
 
 	return http.ListenAndServe(addr, r)
 }
@@ -632,33 +630,6 @@ type runtimeBuildInspection struct {
 	ExitCode      *int64     `json:"exitCode"`
 	ArtifactURL   *string    `json:"artifactUrl"`
 	BuilderVersion *string   `json:"builderVersion"`
-}
-
-// ─── Auth middleware ───────────────────────────────────────────────────────────
-
-func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiToken == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "UNAUTHORIZED",
-				"message": "API token is not configured",
-			})
-			return
-		}
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != s.apiToken {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "UNAUTHORIZED",
-				"message": "invalid or missing API token",
-			})
-			return
-		}
-		next(w, r)
-	}
 }
 
 // ─── Status mapping ────────────────────────────────────────────────────────────
