@@ -1834,7 +1834,7 @@ func main() {}
 	}
 }
 
-func TestAutoDetectBuildConfigGoGinUsesSingleStageDockerfile(t *testing.T) {
+func TestAutoDetectBuildConfigGoGinUsesMultiStageDockerfile(t *testing.T) {
 	repo := t.TempDir()
 	goMod := `module example.com/app
 
@@ -1868,8 +1868,17 @@ func main() {
 		t.Fatalf("expected framework gin, got %q", cfg.Framework)
 	}
 	dockerfile := string(cfg.DockerfileContent)
-	if strings.Contains(dockerfile, "COPY --from=builder") {
-		t.Fatalf("did not expect multi-stage go runtime copy, got:\n%s", dockerfile)
+	if !strings.Contains(dockerfile, "FROM golang:1.23-alpine AS builder") {
+		t.Fatalf("expected multi-stage builder, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "CGO_ENABLED=0") {
+		t.Fatalf("expected CGO_ENABLED=0, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "FROM alpine:3.20") {
+		t.Fatalf("expected alpine runtime stage, got:\n%s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "COPY --from=builder /app/app /app/app") {
+		t.Fatalf("expected multi-stage binary copy, got:\n%s", dockerfile)
 	}
 	if !strings.Contains(dockerfile, "COPY go.mod go.sum ./") {
 		t.Fatalf("expected go dependency file copy, got:\n%s", dockerfile)

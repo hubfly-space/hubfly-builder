@@ -62,7 +62,7 @@ func defaultBuildPlan(runtime, version, installCommand, buildCommand, runCommand
 			RunCommand:     runCommand,
 			ExposePort:     "4000",
 			BuilderImage:   "elixir:" + version,
-			RuntimeImage:   "elixir:" + version,
+			RuntimeImage:   selectElixirRuntimeImage(version, runCommand),
 			RuntimeEnv: map[string]string{
 				"MIX_ENV": "prod",
 			},
@@ -179,6 +179,14 @@ func selectJavaRuntimeImage(version string) string {
 		version = "17"
 	}
 	return "eclipse-temurin:" + version + "-jre"
+}
+
+func selectElixirRuntimeImage(version, runCommand string) string {
+	run := strings.TrimSpace(runCommand)
+	if strings.Contains(run, "_build/prod/rel/") || strings.Contains(run, "mix release") {
+		return "debian:bookworm-slim"
+	}
+	return "elixir:" + version + "-slim"
 }
 
 func generateDockerfileForPlan(plan buildPlan, buildArgKeys, secretBuildKeys []string) ([]byte, error) {
@@ -358,6 +366,9 @@ func renderApplicationDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 	if prune := runtimePruneCommand(plan); prune != "" {
 		builder.WriteString(prune)
 	}
+	if cleanup := builderCleanupCommand(plan); cleanup != "" {
+		builder.WriteString(cleanup)
+	}
 
 	builder.WriteString("\n")
 
@@ -536,9 +547,22 @@ func runtimePruneCommand(plan buildPlan) string {
 		if strings.HasPrefix(install, "pnpm ") {
 			return "RUN pnpm prune --prod\n\n"
 		}
+		if strings.HasPrefix(install, "yarn ") {
+			return "RUN yarn install --production --ignore-scripts && yarn cache clean\n\n"
+		}
 		return ""
 	case "bun":
 		return ""
+	default:
+		return ""
+	}
+}
+
+func builderCleanupCommand(plan buildPlan) string {
+	runtime := strings.TrimSpace(strings.ToLower(plan.Runtime))
+	switch runtime {
+	case "node", "bun":
+		return "RUN rm -rf /tmp/* /root/.npm /root/.cache\n\n"
 	default:
 		return ""
 	}
@@ -591,7 +615,7 @@ func renderPythonDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 			builder.WriteString(runLine)
 		}
 	}
-	builder.WriteString("RUN rm -rf /root/.cache/pip /tmp/*\n\n")
+	builder.WriteString("RUN rm -rf /root/.cache/pip /tmp/* && find /opt/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true\n\n")
 
 	runtimeImage := strings.TrimSpace(plan.RuntimeImage)
 	if runtimeImage == "" {
@@ -690,8 +714,9 @@ func renderSimpleFlaskDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys [
 
 func renderGoDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "FROM %s\n\n", strings.TrimSpace(plan.BuilderImage))
+	fmt.Fprintf(&builder, "FROM %s AS builder\n\n", strings.TrimSpace(plan.BuilderImage))
 	builder.WriteString("WORKDIR /app\n\n")
+	builder.WriteString("ENV CGO_ENABLED=0\n\n")
 
 	if argLines := renderArgLines(buildArgKeys); argLines != "" {
 		builder.WriteString(argLines)
@@ -704,14 +729,14 @@ func renderGoDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) 
 		builder.WriteString(strings.Join(depFiles, " "))
 		builder.WriteString(" ./\n\n")
 	}
+	if runLine := renderRunLine(plan.InstallCommand, secretBuildKeys); runLine != "" {
+		builder.WriteString(runLine)
+	}
 	builder.WriteString("COPY . ./\n\n")
 	for _, command := range plan.BootstrapCommands {
 		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
 			builder.WriteString(runLine)
 		}
-	}
-	if runLine := renderRunLine(plan.InstallCommand, secretBuildKeys); runLine != "" {
-		builder.WriteString(runLine)
 	}
 	for _, command := range plan.SetupCommands {
 		if runLine := renderRunLine(command, secretBuildKeys); runLine != "" {
@@ -727,6 +752,14 @@ func renderGoDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) 
 		}
 	}
 	builder.WriteString("\n")
+
+	runtimeImage := strings.TrimSpace(plan.RuntimeImage)
+	if runtimeImage == "" {
+		runtimeImage = "alpine:3.20"
+	}
+	fmt.Fprintf(&builder, "FROM %s\n\n", runtimeImage)
+	builder.WriteString("WORKDIR /app\n\n")
+	builder.WriteString("COPY --from=builder /app/app /app/app\n\n")
 
 	if envLines := renderEnvLines(plan.RuntimeEnv); envLines != "" {
 		builder.WriteString(envLines)
@@ -785,6 +818,7 @@ func renderPHPDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string)
 	fmt.Fprintf(&builder, "FROM %s\n\n", strings.TrimSpace(plan.BuilderImage))
 	builder.WriteString("WORKDIR /app\n\n")
 	builder.WriteString("COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer\n\n")
+	builder.WriteString("ENV COMPOSER_ALLOW_SUPERUSER=1\n\n")
 	builder.WriteString("COPY . .\n\n")
 
 	if argLines := renderArgLines(buildArgKeys); argLines != "" {
@@ -825,6 +859,7 @@ func renderPHPDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string)
 			builder.WriteString(runLine)
 		}
 	}
+	builder.WriteString("RUN rm -rf /root/.composer/cache /tmp/*\n")
 
 	if envLines := renderEnvLines(plan.RuntimeEnv); envLines != "" {
 		builder.WriteString("\n")

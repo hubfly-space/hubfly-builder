@@ -26,18 +26,18 @@ The production service reads a global JSON config from `/etc/hubfly-builder/conf
 
 For local development, if the global config cannot be created and `HUBFLY_BUILDER_CONFIG` is not set, the builder falls back to `configs/env.json`.
 
-| Key | Description | Default / Example |
-| :--- | :--- | :--- |
-| `HUBCELL_BASE_URL` | Hubcell API base URL used by ancillary Hubcell integrations | `http://127.0.0.1:10012` |
-| `HUBCELL_CLI_PATH` | Hubcell executable path, or a directory containing `hubcell` | `/usr/local/bin/hubcell` |
-| `CALLBACK_URL` | Backend webhook for reporting results | `https://hubfly.space/api/builds/callback` |
-| `SERVER_ADDR` | Build API listen address | `:10008` |
-| `UPLOAD_ADDR` | Image upload API listen address | `:10011` |
-| `DATA_DIR` | SQLite state directory | `/var/lib/hubfly-builder` under systemd |
-| `LOG_DIR` | System and job log directory | `/var/log/hubfly-builder` under systemd |
-| `MAX_CONCURRENT_BUILDS` | Concurrent build worker limit | `3` |
-| `LOG_RETENTION_DAYS` | Job log retention window | `7` |
-| `UPDATE_LOCKFILE` | Lockfile path to signal active builds | `/run/hubfly-builder-update.lock` |
+| Key                     | Description                                                  | Default / Example                              |
+| :---------------------- | :----------------------------------------------------------- | :--------------------------------------------- |
+| `HUBCELL_BASE_URL`      | Hubcell API base URL used by ancillary Hubcell integrations  | `http://127.0.0.1:10012`                       |
+| `HUBCELL_CLI_PATH`      | Hubcell executable path, or a directory containing `hubcell` | `/usr/local/bin/hubcell`                       |
+| `CALLBACK_URL`          | Backend webhook for reporting results                        | `https://api.hubfly.space/api/builds/callback` |
+| `SERVER_ADDR`           | Build API listen address                                     | `:10008`                                       |
+| `UPLOAD_ADDR`           | Image upload API listen address                              | `:10011`                                       |
+| `DATA_DIR`              | SQLite state directory                                       | `/var/lib/hubfly-builder` under systemd        |
+| `LOG_DIR`               | System and job log directory                                 | `/var/log/hubfly-builder` under systemd        |
+| `MAX_CONCURRENT_BUILDS` | Concurrent build worker limit                                | `3`                                            |
+| `LOG_RETENTION_DAYS`    | Job log retention window                                     | `7`                                            |
+| `UPDATE_LOCKFILE`       | Lockfile path to signal active builds                        | `/run/hubfly-builder-update.lock`              |
 
 Example `/etc/hubfly-builder/config.json`:
 
@@ -45,7 +45,7 @@ Example `/etc/hubfly-builder/config.json`:
 {
   "HUBCELL_BASE_URL": "http://127.0.0.1:10012",
   "HUBCELL_CLI_PATH": "/usr/local/bin/hubcell",
-  "CALLBACK_URL": "https://hubfly.space/api/builds/callback",
+  "CALLBACK_URL": "https://api.hubfly.space/api/builds/callback",
   "SERVER_ADDR": ":10008",
   "UPLOAD_ADDR": ":10011",
   "DATA_DIR": "/var/lib/hubfly-builder",
@@ -68,13 +68,13 @@ Build jobs call `sudo <HUBCELL_CLI_PATH> build` with the job image tag, required
 
 At runtime the builder creates and uses these local paths:
 
-| Path | Purpose |
-| :--- | :--- |
-| `/etc/hubfly-builder/config.json` | Global service config |
+| Path                                            | Purpose                                          |
+| :---------------------------------------------- | :----------------------------------------------- |
+| `/etc/hubfly-builder/config.json`               | Global service config                            |
 | `/var/lib/hubfly-builder/hubfly-builder.sqlite` | SQLite database for jobs and state under systemd |
-| `/var/log/hubfly-builder/` | System log and per-job build logs under systemd |
-| `./configs/env.json` | Local development fallback config |
-| `./data/`, `./log/` | Local development state and logs |
+| `/var/log/hubfly-builder/`                      | System log and per-job build logs under systemd  |
+| `./configs/env.json`                            | Local development fallback config                |
+| `./data/`, `./log/`                             | Local development state and logs                 |
 
 The packaged systemd unit creates `/etc/hubfly-builder`, `/var/lib/hubfly-builder`, and `/var/log/hubfly-builder` with ownership assigned to the `hubfly-builder` user.
 
@@ -84,15 +84,15 @@ The packaged systemd unit creates `/etc/hubfly-builder`, `/var/lib/hubfly-builde
 
 When `isAutoBuild` is set to `true`, the builder inspects the repository root (or the specified `workingDir`) to identify the runtime:
 
-| Runtime | Detection File | Default Image |
-| :--- | :--- | :--- |
-| **Bun** | `bun.lock` | `oven/bun:1.2` |
-| **Node.js** | `package.json` | `node:18-alpine` |
-| **Go** | `go.mod` | `golang:1.18-alpine` |
-| **Python** | `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` | `python:3.14.4-slim` |
-| **Java** | `pom.xml`, `build.gradle`, `build.gradle.kts` | `maven:3.9-eclipse-temurin-17` / `gradle:8-jdk17` |
-| **Static** | `index.html` | `nginx:alpine` |
-| **PHP** | `composer.json` | `php:8.3-apache` / `php:8.3-fpm` / `php:8.3-cli` |
+| Runtime     | Detection File                                              | Default Image                                     |
+| :---------- | :---------------------------------------------------------- | :------------------------------------------------ |
+| **Bun**     | `bun.lock`                                                  | `oven/bun:1.2`                                    |
+| **Node.js** | `package.json`                                              | `node:18-alpine`                                  |
+| **Go**      | `go.mod`                                                    | `golang:1.18-alpine`                              |
+| **Python**  | `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` | `python:3.14.4-slim`                              |
+| **Java**    | `pom.xml`, `build.gradle`, `build.gradle.kts`               | `maven:3.9-eclipse-temurin-17` / `gradle:8-jdk17` |
+| **Static**  | `index.html`                                                | `nginx:alpine`                                    |
+| **PHP**     | `composer.json`                                             | `php:8.3-apache` / `php:8.3-fpm` / `php:8.3-cli`  |
 
 If a `Dockerfile` exists in the context, it takes precedence over auto-detection.
 
@@ -111,6 +111,7 @@ Images are tagged according to the following pattern:
 ## API Documentation
 
 ### 1. Create Build Job
+
 Creates a new build job and queues it for execution.
 
 - **URL:** `/api/v1/jobs`
@@ -163,6 +164,7 @@ Creates a new build job and queues it for execution.
 `buildConfig.resourceLimits` is currently accepted for request compatibility but ignored during Hubcell builds. The builder always uses fixed defaults of `cpu=2` and `memoryMB=4096`.
 
 `buildConfig.env` is always treated in `auto` mode:
+
 - Public-prefixed vars (e.g. `NEXT_PUBLIC_`, `VITE_`) are resolved as `both` (build + runtime).
 - Keys with build evidence (`Dockerfile ARG`/reference or known build config references) are resolved to `build`.
 - Unknown keys default to `runtime`.
@@ -170,29 +172,34 @@ Creates a new build job and queues it for execution.
 - The resolved result is returned as `buildConfig.resolvedEnvPlan` and callback metadata (`runtimeEnvKeys`).
 
 `buildConfig.envOverrides` is optional:
+
 - If provided for a key, override values take precedence over auto-detection.
 - `scope` supports `build`, `runtime`, or `both`.
 - `secret` (`true`/`false`) forces whether the key is mounted as a build secret vs passed as build-arg when build scope is active.
 
 `buildConfig.dockerfileArgs` and `buildConfig.dockerfileEnv` are optional and only apply when a `Dockerfile` is found in the repository:
+
 - `dockerfileArgs` are injected as Dockerfile `ARG` declarations.
 - `dockerfileEnv` entries are injected as `ARG` + `ENV` declarations.
 - These fields are ignored for generated Dockerfiles and for `customDockerfile`.
 - Do not put secrets in `dockerfileEnv`; `ENV` values are baked into the resulting image.
 
 `buildConfig.buildContextDir` is optional for repository Dockerfiles:
+
 - By default, the Dockerfile build context is the repository root (`"."`), even when `sourceInfo.workingDir` points to a subdirectory Dockerfile.
 - Set it to a narrower ancestor directory when you want a smaller context.
 - The context must stay inside the repository and must contain `sourceInfo.workingDir`.
 - Use `.dockerignore` to keep a wider context isolated to only the files the Dockerfile needs.
 
 `buildConfig.customDockerfile` is optional:
+
 - Send plain Dockerfile text in this field to force the builder to use that Dockerfile.
 - A custom Dockerfile takes precedence over any `Dockerfile` committed in the repository.
 - The build context defaults to `sourceInfo.workingDir` when a custom Dockerfile is provided.
 - Example: `"customDockerfile": "FROM node:22-alpine\nWORKDIR /app\nCOPY . .\nRUN npm ci\nCMD [\"npm\", \"start\"]\n"`
 
 `buildConfig.network` is required:
+
 - The worker passes this value to `hubcell build --network`.
 - Build requests add only `CHOWN`, `FOWNER`, `FSETID`, `SETUID`, and `SETGID`.
 - If missing/empty, the job is rejected with `no user network provided`.
@@ -204,11 +211,13 @@ Creates a new build job and queues it for execution.
 - Callback payload includes `exposePort` for static runtime only.
 
 Examples:
+
 - Docker publish: `-p 80:8080`
 - Kubernetes Service: `port: 80`, `targetPort: 8080`
 - Nginx reverse proxy: `proxy_pass http://app:8080;`
 
 Callback payload excerpt:
+
 ```json
 {
   "id": "build_uuid_123",
@@ -224,6 +233,7 @@ Callback payload excerpt:
   - `500 Internal Server Error`: Storage failure.
 
 - **Example:**
+
 ```bash
 curl -X POST http://localhost:10008/api/v1/jobs \
   -H "Content-Type: application/json" \
@@ -231,6 +241,7 @@ curl -X POST http://localhost:10008/api/v1/jobs \
 ```
 
 ### 2. Get Job Status
+
 Retrieves the full metadata and current status of a job.
 
 - **URL:** `/api/v1/jobs/{id}`
@@ -240,11 +251,13 @@ Retrieves the full metadata and current status of a job.
   - `404 Not Found`: `{"error": "JOB_NOT_FOUND", "message": "job not found"}`
 
 - **Example:**
+
 ```bash
 curl -i http://localhost:10008/api/v1/jobs/b1
 ```
 
 ### 3. Get Job Logs
+
 Returns the raw text logs of the build process.
 
 - **URL:** `/api/v1/jobs/{id}/logs`
@@ -254,11 +267,13 @@ Returns the raw text logs of the build process.
   - `404 Not Found`: `{"error": "BUILD_LOG_NOT_FOUND", "message": "build log not found"}`
 
 - **Example:**
+
 ```bash
 curl http://localhost:10008/api/v1/jobs/b1/logs
 ```
 
 ### 4. Health Check
+
 Basic availability check.
 
 - **URL:** `/healthz`
@@ -270,12 +285,14 @@ Basic availability check.
 ## Development & Debugging Endpoints
 
 ### List Running Builds
+
 Lists all jobs currently in `claimed` or `building` state.
 
 - **URL:** `/dev/running-builds`
 - **Method:** `GET`
 
 ### Reset Database
+
 Clears all jobs from the SQLite database. **Use with caution.**
 
 - **URL:** `/dev/reset-db`
@@ -285,14 +302,14 @@ Clears all jobs from the SQLite database. **Use with caution.**
 
 ## Errors and Status Codes
 
-| Code | Status | Meaning |
-| :--- | :--- | :--- |
-| `pending` | 201 | Job created, waiting for worker. |
-| `claimed` | - | Job picked up by a worker. |
-| `building` | - | Hubcell build or Git operations in progress. |
-| `success` | - | Build completed successfully. |
-| `failed` | - | An error occurred during the build process. |
-| `canceled` | - | Job was manually terminated. |
+| Code       | Status | Meaning                                      |
+| :--------- | :----- | :------------------------------------------- |
+| `pending`  | 201    | Job created, waiting for worker.             |
+| `claimed`  | -      | Job picked up by a worker.                   |
+| `building` | -      | Hubcell build or Git operations in progress. |
+| `success`  | -      | Build completed successfully.                |
+| `failed`   | -      | An error occurred during the build process.  |
+| `canceled` | -      | Job was manually terminated.                 |
 
 ---
 
@@ -391,6 +408,7 @@ For each job, the builder:
 The Hubcell virtual network named by `buildConfig.network` is passed directly to the Hubcell build CLI.
 
 ### Build From Source
+
 ```bash
 git clone https://github.com/hubfly/hubfly-builder.git
 cd hubfly-builder
@@ -411,6 +429,7 @@ The GitHub release publishes per-platform bundles:
 Each release asset also has a matching `.sha256` checksum file. Extracting a bundle places the `hubfly-builder` binary (or `hubfly-builder.exe` on Windows) at the archive root, alongside `README.md`.
 
 ### Run The Server
+
 ```bash
 ./hubfly-builder
 ```
@@ -465,7 +484,9 @@ The `Makefile` makes it extremely easy to push your local uncommitted changes di
 > **Note**: These commands assume you have SSH access to `root@test1-hubfly-node`. You can edit the `TEST_SERVER` variable in the `Makefile` if your test server differs.
 
 #### `make deploy-full` (First-Time Install / Config Updates)
+
 Use this command **the first time** you are installing the builder on the test server, or if you modify the systemd service or sudoers configurations.
+
 - Compiles the Linux binary locally.
 - Safely waits for active builds to finish, then stops the service.
 - Creates the `hubfly-builder` system user and all necessary directories with correct permissions.
@@ -473,7 +494,9 @@ Use this command **the first time** you are installing the builder on the test s
 - Uploads the binary, reloads the systemd daemon, enables, and starts the service.
 
 #### `make deploy` (Routine Code Updates)
+
 Use this command for **all subsequent deployments** when you only need to push a new compiled binary.
+
 - Cross-compiles the Linux binary locally.
 - Checks the remote server for the active lockfile (`/run/hubfly-builder-update.lock`). If a build is running, it will automatically pause and wait for it to finish, ensuring no jobs are interrupted.
 - Once safe, it stops the service, updates the binary, and restarts it.

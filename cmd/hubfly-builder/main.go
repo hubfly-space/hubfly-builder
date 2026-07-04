@@ -25,7 +25,7 @@ const (
 	localConfigPath         = "configs/env.json"
 	defaultHubcellBaseURL   = "http://127.0.0.1:10012"
 	defaultHubcellCLIPath   = "/usr/local/bin/hubcell"
-	defaultCallbackURL      = "https://hubfly.space/api/builds/callback"
+	defaultCallbackURL      = "https://api.hubfly.space/api/builds/callback"
 	defaultServerAddr       = ":10008"
 	defaultUploadAddr       = ":10011"
 	defaultDataDir          = "./data"
