@@ -3,6 +3,10 @@ package uploadserver
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,19 +22,20 @@ import (
 )
 
 type Server struct {
-	callbackURL string
-	httpClient  *http.Client
+	callbackURL    string
+	callbackSecret string
+	httpClient     *http.Client
 }
 
 type callbackPayload struct {
-	ID              string  `json:"id"`
-	Status          string  `json:"status"`
-	StartedAt       string  `json:"startedAt,omitempty"`
-	FinishedAt      string  `json:"finishedAt,omitempty"`
-	DurationSeconds float64 `json:"durationSeconds,omitempty"`
-	ImageTag        string  `json:"imageTag,omitempty"`
-	Error           string  `json:"error,omitempty"`
-	UploadToken     string  `json:"uploadToken,omitempty"`
+	BuildID     string `json:"buildId"`
+	Status      string `json:"status"`
+	StartedAt   string `json:"startedAt,omitempty"`
+	FinishedAt  string `json:"finishedAt,omitempty"`
+	DurationMs  int64  `json:"durationMs,omitempty"`
+	ImageTag    string `json:"imageTag,omitempty"`
+	Error       string `json:"error,omitempty"`
+	UploadToken string `json:"uploadToken,omitempty"`
 }
 
 type uploadSessionManifest struct {
@@ -55,9 +60,10 @@ type uploadSessionResponse struct {
 	UploadedChunks []int  `json:"uploadedChunks"`
 }
 
-func NewServer(callbackURL string) *Server {
+func NewServer(callbackURL string, callbackSecret string) *Server {
 	return &Server{
-		callbackURL: strings.TrimSpace(callbackURL),
+		callbackURL:    strings.TrimSpace(callbackURL),
+		callbackSecret: strings.TrimSpace(callbackSecret),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -233,7 +239,7 @@ func (s *Server) handleCompleteUploadSession(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := s.reportCallback(callbackPayload{
-		ID:          buildID,
+		BuildID:     buildID,
 		Status:      "building",
 		StartedAt:   startedAt.Format(time.RFC3339),
 		UploadToken: uploadToken,
@@ -271,6 +277,11 @@ func (s *Server) handleCompleteUploadSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if output, err := runCommand("docker", "push", imageTag); err != nil {
+		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker push failed: %s", sanitizeOutput(output, err)))
+		return
+	}
+
 	defer func() {
 		if manifest.SourceImage != imageTag {
 			_, _ = runCommand("docker", "image", "rm", "-f", manifest.SourceImage)
@@ -280,13 +291,13 @@ func (s *Server) handleCompleteUploadSession(w http.ResponseWriter, r *http.Requ
 
 	finishedAt := time.Now().UTC()
 	if err := s.reportCallback(callbackPayload{
-		ID:              buildID,
-		Status:          "success",
-		StartedAt:       startedAt.Format(time.RFC3339),
-		FinishedAt:      finishedAt.Format(time.RFC3339),
-		DurationSeconds: finishedAt.Sub(startedAt).Seconds(),
-		ImageTag:        imageTag,
-		UploadToken:     uploadToken,
+		BuildID:     buildID,
+		Status:      "success",
+		StartedAt:   startedAt.Format(time.RFC3339),
+		FinishedAt:  finishedAt.Format(time.RFC3339),
+		DurationMs:  finishedAt.Sub(startedAt).Milliseconds(),
+		ImageTag:    imageTag,
+		UploadToken: uploadToken,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("callback failed: %v", err), http.StatusBadGateway)
 		return
@@ -313,7 +324,7 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.reportCallback(callbackPayload{
-		ID:          buildID,
+		BuildID:     buildID,
 		Status:      "building",
 		StartedAt:   startedAt.Format(time.RFC3339),
 		UploadToken: uploadToken,
@@ -344,6 +355,11 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if output, err := runCommand("docker", "push", imageTag); err != nil {
+		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker push failed: %s", sanitizeOutput(output, err)))
+		return
+	}
+
 	defer func() {
 		if sourceImage != imageTag {
 			_, _ = runCommand("docker", "image", "rm", "-f", sourceImage)
@@ -352,13 +368,13 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 
 	finishedAt := time.Now().UTC()
 	if err := s.reportCallback(callbackPayload{
-		ID:              buildID,
-		Status:          "success",
-		StartedAt:       startedAt.Format(time.RFC3339),
-		FinishedAt:      finishedAt.Format(time.RFC3339),
-		DurationSeconds: finishedAt.Sub(startedAt).Seconds(),
-		ImageTag:        imageTag,
-		UploadToken:     uploadToken,
+		BuildID:     buildID,
+		Status:      "success",
+		StartedAt:   startedAt.Format(time.RFC3339),
+		FinishedAt:  finishedAt.Format(time.RFC3339),
+		DurationMs:  finishedAt.Sub(startedAt).Milliseconds(),
+		ImageTag:    imageTag,
+		UploadToken: uploadToken,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("callback failed: %v", err), http.StatusBadGateway)
 		return
@@ -598,13 +614,13 @@ func (s *Server) failUpload(
 	log.Printf("ERROR: image upload failed for %s: %v", buildID, err)
 	finishedAt := time.Now().UTC()
 	if callbackErr := s.reportCallback(callbackPayload{
-		ID:              buildID,
-		Status:          "failed",
-		StartedAt:       startedAt.Format(time.RFC3339),
-		FinishedAt:      finishedAt.Format(time.RFC3339),
-		DurationSeconds: finishedAt.Sub(startedAt).Seconds(),
-		Error:           err.Error(),
-		UploadToken:     uploadToken,
+		BuildID:     buildID,
+		Status:      "failed",
+		StartedAt:   startedAt.Format(time.RFC3339),
+		FinishedAt:  finishedAt.Format(time.RFC3339),
+		DurationMs:  finishedAt.Sub(startedAt).Milliseconds(),
+		Error:       err.Error(),
+		UploadToken: uploadToken,
 	}); callbackErr != nil {
 		log.Printf("WARN: failed to report failed upload callback for %s: %v", buildID, callbackErr)
 	}
@@ -627,6 +643,16 @@ func (s *Server) reportCallback(payload callbackPayload) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	if s.callbackSecret != "" {
+		eventID := generateEventID()
+		timestamp := fmt.Sprintf("%d", time.Now().Unix())
+		signature := signPayload(s.callbackSecret, timestamp, eventID, body)
+
+		req.Header.Set("x-hubfly-event-id", eventID)
+		req.Header.Set("x-hubfly-timestamp", timestamp)
+		req.Header.Set("x-hubfly-signature", signature)
+	}
+
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -640,13 +666,28 @@ func (s *Server) reportCallback(payload callbackPayload) error {
 	return nil
 }
 
+func generateEventID() string {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("evt_%s", hex.EncodeToString(bytes))
+}
+
+func signPayload(secret, timestamp, eventID string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	signedPayload := fmt.Sprintf("%s.%s.%s", timestamp, eventID, string(body))
+	mac.Write([]byte(signedPayload))
+	return fmt.Sprintf("v1=%s", hex.EncodeToString(mac.Sum(nil)))
+}
+
 func (s *Server) generateImageTag(buildID string) string {
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	buildID = sanitizeImageComponent(buildID)
 	if buildID == "" {
 		buildID = "upload"
 	}
-	return fmt.Sprintf("hubcell.local/hubfly-cli-upload:%s-%s", buildID, ts)
+	return fmt.Sprintf("127.0.0.1:10013/hubfly-cli-upload:%s-%s", buildID, ts)
 }
 
 func writeRequestBodyToTemp(body io.ReadCloser, buildID string) (string, func(), error) {

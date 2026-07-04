@@ -1,7 +1,7 @@
 .PHONY: all build test clean vet lint sec-scan build-linux deploy deploy-full
 
 BINARY_NAME=hubfly-builder
-TEST_SERVER=root@test1-hubfly-node
+TEST_SERVER=root@100.66.212.61
 
 all: build
 

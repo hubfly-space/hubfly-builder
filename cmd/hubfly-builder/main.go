@@ -325,7 +325,7 @@ func main() {
 	manager := executor.NewManager(storage, logManager, allowedCommands, apiClient, config.MaxConcurrentBuilds, config.UpdateLockfile)
 	go manager.Start()
 
-	uploadServer := uploadserver.NewServer(callbackURL)
+	uploadServer := uploadserver.NewServer(callbackURL, config.CallbackSecret)
 	go func() {
 		log.Printf("Image upload server listening on %s", config.UploadAddr)
 		if err := uploadServer.Start(config.UploadAddr); err != nil {
