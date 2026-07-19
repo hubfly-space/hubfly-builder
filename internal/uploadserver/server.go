@@ -3,6 +3,7 @@ package uploadserver
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,12 +14,15 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
 type Server struct {
@@ -40,6 +44,7 @@ type callbackPayload struct {
 
 type uploadSessionManifest struct {
 	BuildID         string `json:"buildId"`
+	ProjectID       string `json:"projectId"`
 	SourceImage     string `json:"sourceImage"`
 	UploadToken     string `json:"uploadToken"`
 	ContentEncoding string `json:"contentEncoding"`
@@ -90,7 +95,7 @@ func (s *Server) handleUploadSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buildID, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
+	buildID, projectID, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
 	if !ok {
 		return
 	}
@@ -110,6 +115,7 @@ func (s *Server) handleUploadSessions(w http.ResponseWriter, r *http.Request) {
 
 	manifest := uploadSessionManifest{
 		BuildID:         buildID,
+		ProjectID:       projectID,
 		SourceImage:     sourceImage,
 		UploadToken:     uploadToken,
 		ContentEncoding: strings.TrimSpace(payload.ContentEncoding),
@@ -165,7 +171,7 @@ func (s *Server) handleUploadSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, buildID string, chunkIndex int) {
-	_, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
+	_, projectID, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
 	if !ok {
 		return
 	}
@@ -177,6 +183,10 @@ func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, build
 	}
 	if manifest.UploadToken != uploadToken {
 		http.Error(w, "invalid upload token", http.StatusForbidden)
+		return
+	}
+	if manifest.ProjectID != projectID {
+		http.Error(w, "invalid project id", http.StatusForbidden)
 		return
 	}
 	if manifest.SourceImage != sourceImage {
@@ -219,7 +229,7 @@ func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, build
 
 func (s *Server) handleCompleteUploadSession(w http.ResponseWriter, r *http.Request, buildID string) {
 	startedAt := time.Now().UTC()
-	_, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
+	_, projectID, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
 	if !ok {
 		return
 	}
@@ -231,6 +241,10 @@ func (s *Server) handleCompleteUploadSession(w http.ResponseWriter, r *http.Requ
 	}
 	if manifest.UploadToken != uploadToken {
 		http.Error(w, "invalid upload token", http.StatusForbidden)
+		return
+	}
+	if manifest.ProjectID != projectID {
+		http.Error(w, "invalid project id", http.StatusForbidden)
 		return
 	}
 	if manifest.SourceImage != sourceImage {
@@ -261,31 +275,13 @@ func (s *Server) handleCompleteUploadSession(w http.ResponseWriter, r *http.Requ
 	}
 	defer loadCleanup()
 
-	if output, err := runCommand("docker", "load", "-i", loadPath); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker load failed: %s", sanitizeOutput(output, err)))
-		return
-	}
-
-	if output, err := runCommand("docker", "image", "inspect", manifest.SourceImage); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("loaded image %q not found: %s", manifest.SourceImage, sanitizeOutput(output, err)))
-		return
-	}
-
-	imageTag := s.generateImageTag(buildID)
-	if output, err := runCommand("docker", "tag", manifest.SourceImage, imageTag); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker tag failed: %s", sanitizeOutput(output, err)))
-		return
-	}
-
-	if output, err := runCommand("docker", "push", imageTag); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker push failed: %s", sanitizeOutput(output, err)))
+	imageTag, err := pushUploadedImageArchive(loadPath, manifest.ProjectID, manifest.BuildID, manifest.SourceImage)
+	if err != nil {
+		s.failUpload(w, buildID, uploadToken, startedAt, err)
 		return
 	}
 
 	defer func() {
-		if manifest.SourceImage != imageTag {
-			_, _ = runCommand("docker", "image", "rm", "-f", manifest.SourceImage)
-		}
 		_ = os.RemoveAll(s.uploadSessionDir(buildID))
 	}()
 
@@ -318,7 +314,7 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now().UTC()
-	buildID, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
+	buildID, projectID, sourceImage, uploadToken, ok := readUploadHeaders(w, r)
 	if !ok {
 		return
 	}
@@ -339,32 +335,11 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	if output, err := runCommand("docker", "load", "-i", archivePath); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker load failed: %s", sanitizeOutput(output, err)))
+	imageTag, err := pushUploadedImageArchive(archivePath, projectID, buildID, sourceImage)
+	if err != nil {
+		s.failUpload(w, buildID, uploadToken, startedAt, err)
 		return
 	}
-
-	if output, err := runCommand("docker", "image", "inspect", sourceImage); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("loaded image %q not found: %s", sourceImage, sanitizeOutput(output, err)))
-		return
-	}
-
-	imageTag := s.generateImageTag(buildID)
-	if output, err := runCommand("docker", "tag", sourceImage, imageTag); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker tag failed: %s", sanitizeOutput(output, err)))
-		return
-	}
-
-	if output, err := runCommand("docker", "push", imageTag); err != nil {
-		s.failUpload(w, buildID, uploadToken, startedAt, fmt.Errorf("docker push failed: %s", sanitizeOutput(output, err)))
-		return
-	}
-
-	defer func() {
-		if sourceImage != imageTag {
-			_, _ = runCommand("docker", "image", "rm", "-f", sourceImage)
-		}
-	}()
 
 	finishedAt := time.Now().UTC()
 	if err := s.reportCallback(callbackPayload{
@@ -388,15 +363,16 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func readUploadHeaders(w http.ResponseWriter, r *http.Request) (string, string, string, bool) {
+func readUploadHeaders(w http.ResponseWriter, r *http.Request) (string, string, string, string, bool) {
 	buildID := strings.TrimSpace(r.Header.Get("X-Hubfly-Build-Id"))
+	projectID := strings.TrimSpace(r.Header.Get("X-Hubfly-Project-Id"))
 	sourceImage := strings.TrimSpace(r.Header.Get("X-Hubfly-Source-Image"))
 	uploadToken := strings.TrimSpace(r.Header.Get("X-Hubfly-Upload-Token"))
-	if buildID == "" || sourceImage == "" || uploadToken == "" {
+	if buildID == "" || projectID == "" || sourceImage == "" || uploadToken == "" {
 		http.Error(w, "missing upload headers", http.StatusBadRequest)
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	return buildID, sourceImage, uploadToken, true
+	return buildID, projectID, sourceImage, uploadToken, true
 }
 
 func (s *Server) ensureUploadSession(manifest uploadSessionManifest) error {
@@ -408,6 +384,9 @@ func (s *Server) ensureUploadSession(manifest uploadSessionManifest) error {
 	if err == nil {
 		if existing.UploadToken != manifest.UploadToken {
 			return fmt.Errorf("upload token mismatch for build %s", manifest.BuildID)
+		}
+		if existing.ProjectID != manifest.ProjectID {
+			return fmt.Errorf("project id mismatch for build %s", manifest.BuildID)
 		}
 		if existing.SourceImage != manifest.SourceImage {
 			return fmt.Errorf("source image mismatch for build %s", manifest.BuildID)
@@ -681,13 +660,17 @@ func signPayload(secret, timestamp, eventID string, body []byte) string {
 	return fmt.Sprintf("v1=%s", hex.EncodeToString(mac.Sum(nil)))
 }
 
-func (s *Server) generateImageTag(buildID string) string {
+func (s *Server) generateImageTag(projectID string, buildID string) string {
 	ts := time.Now().UTC().Format("20060102T150405Z")
+	projectID = sanitizeImageComponent(projectID)
 	buildID = sanitizeImageComponent(buildID)
+	if projectID == "" {
+		projectID = "project"
+	}
 	if buildID == "" {
 		buildID = "upload"
 	}
-	return fmt.Sprintf("127.0.0.1:10013/hubfly-cli-upload:%s-%s", buildID, ts)
+	return fmt.Sprintf("127.0.0.1:10017/%s:%s-%s", projectID, buildID, ts)
 }
 
 func writeRequestBodyToTemp(body io.ReadCloser, buildID string) (string, func(), error) {
@@ -720,10 +703,67 @@ func writeRequestBodyToTemp(body io.ReadCloser, buildID string) (string, func(),
 	}, nil
 }
 
-func runCommand(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	output, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(output)), err
+func pushUploadedImageArchive(
+	archivePath string,
+	projectID string,
+	buildID string,
+	sourceImage string,
+) (string, error) {
+	sourceTag, err := resolveTarballSourceTag(archivePath, sourceImage)
+	if err != nil {
+		return "", err
+	}
+
+	img, err := tarball.ImageFromPath(archivePath, sourceTag)
+	if err != nil {
+		return "", fmt.Errorf("failed to load uploaded image archive: %w", err)
+	}
+
+	destTagName := (&Server{}).generateImageTag(projectID, buildID)
+	destTag, err := name.NewTag(destTagName, name.WeakValidation, name.Insecure)
+	if err != nil {
+		return "", fmt.Errorf("invalid destination image tag %q: %w", destTagName, err)
+	}
+
+	if err := remote.Write(destTag, img, remote.WithContext(context.Background())); err != nil {
+		return "", fmt.Errorf("failed to push uploaded image into hubcell registry: %w", err)
+	}
+
+	return destTag.Name(), nil
+}
+
+func resolveTarballSourceTag(archivePath string, sourceImage string) (*name.Tag, error) {
+	if tag, err := parseTarballTag(sourceImage); err == nil {
+		return tag, nil
+	}
+
+	manifest, err := tarball.LoadManifest(func() (io.ReadCloser, error) {
+		return os.Open(archivePath)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read upload manifest: %w", err)
+	}
+	for _, descriptor := range manifest {
+		for _, repoTag := range descriptor.RepoTags {
+			if tag, err := parseTarballTag(repoTag); err == nil {
+				return tag, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("uploaded archive did not contain a readable image tag")
+}
+
+func parseTarballTag(value string) (*name.Tag, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty image tag")
+	}
+	tag, err := name.NewTag(trimmed, name.WeakValidation)
+	if err != nil {
+		return nil, err
+	}
+	return &tag, nil
 }
 
 func sanitizeOutput(output string, err error) string {
