@@ -13,7 +13,6 @@ func clearConfigEnv(t *testing.T) {
 		"HUBCELL_CLI_PATH",
 		"CALLBACK_URL",
 		"SERVER_ADDR",
-		"UPLOAD_ADDR",
 		"DATA_DIR",
 		"LOG_DIR",
 		"MAX_CONCURRENT_BUILDS",

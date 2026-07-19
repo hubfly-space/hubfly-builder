@@ -32,7 +32,6 @@ For local development, if the global config cannot be created and `HUBFLY_BUILDE
 | `HUBCELL_CLI_PATH`      | Hubcell executable path, or a directory containing `hubcell` | `/usr/local/bin/hubcell`                       |
 | `CALLBACK_URL`          | Backend webhook for reporting results                        | `https://api.hubfly.space/api/builds/callback` |
 | `SERVER_ADDR`           | Build API listen address                                     | `:10008`                                       |
-| `UPLOAD_ADDR`           | Image upload API listen address                              | `:10011`                                       |
 | `DATA_DIR`              | SQLite state directory                                       | `/var/lib/hubfly-builder` under systemd        |
 | `LOG_DIR`               | System and job log directory                                 | `/var/log/hubfly-builder` under systemd        |
 | `MAX_CONCURRENT_BUILDS` | Concurrent build worker limit                                | `3`                                            |
@@ -47,7 +46,6 @@ Example `/etc/hubfly-builder/config.json`:
   "HUBCELL_CLI_PATH": "/usr/local/bin/hubcell",
   "CALLBACK_URL": "https://api.hubfly.space/api/builds/callback",
   "SERVER_ADDR": ":10008",
-  "UPLOAD_ADDR": ":10011",
   "DATA_DIR": "/var/lib/hubfly-builder",
   "LOG_DIR": "/var/log/hubfly-builder",
   "MAX_CONCURRENT_BUILDS": 3,

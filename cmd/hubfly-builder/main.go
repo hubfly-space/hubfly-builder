@@ -17,7 +17,6 @@ import (
 	"hubfly-builder/internal/offline"
 	"hubfly-builder/internal/server"
 	"hubfly-builder/internal/storage"
-	"hubfly-builder/internal/uploadserver"
 )
 
 const (
@@ -27,7 +26,6 @@ const (
 	defaultHubcellCLIPath   = "/usr/local/bin/hubcell"
 	defaultCallbackURL      = "https://api.hubfly.space/api/builds/callback"
 	defaultServerAddr       = ":10008"
-	defaultUploadAddr       = ":10011"
 	defaultDataDir          = "./data"
 	defaultLogDir           = "./log"
 	defaultGlobalDataDir    = "/var/lib/hubfly-builder"
@@ -44,7 +42,6 @@ type EnvConfig struct {
 	HubcellCLIPath      string `json:"HUBCELL_CLI_PATH"`
 	CallbackURL         string `json:"CALLBACK_URL"`
 	ServerAddr          string `json:"SERVER_ADDR"`
-	UploadAddr          string `json:"UPLOAD_ADDR"`
 	DataDir             string `json:"DATA_DIR"`
 	LogDir              string `json:"LOG_DIR"`
 	MaxConcurrentBuilds int    `json:"MAX_CONCURRENT_BUILDS"`
@@ -59,7 +56,6 @@ func defaultEnvConfig() EnvConfig {
 		HubcellCLIPath:      defaultHubcellCLIPath,
 		CallbackURL:         defaultCallbackURL,
 		ServerAddr:          defaultServerAddr,
-		UploadAddr:          defaultUploadAddr,
 		DataDir:             defaultDataDir,
 		LogDir:              defaultLogDir,
 		MaxConcurrentBuilds: defaultConcurrentBuilds,
@@ -157,9 +153,6 @@ func mergeEnvConfig(dst *EnvConfig, src EnvConfig) {
 	if src.ServerAddr != "" {
 		dst.ServerAddr = src.ServerAddr
 	}
-	if src.UploadAddr != "" {
-		dst.UploadAddr = src.UploadAddr
-	}
 	if src.DataDir != "" {
 		dst.DataDir = src.DataDir
 	}
@@ -192,9 +185,6 @@ func applyEnvironmentOverrides(config *EnvConfig) {
 	}
 	if value := os.Getenv("SERVER_ADDR"); value != "" {
 		config.ServerAddr = value
-	}
-	if value := os.Getenv("UPLOAD_ADDR"); value != "" {
-		config.UploadAddr = value
 	}
 	if value := os.Getenv("DATA_DIR"); value != "" {
 		config.DataDir = value
@@ -282,12 +272,11 @@ func main() {
 		callbackSecretDisplay = "configured"
 	}
 	log.Printf(
-		"Config: HUBCELL_BASE_URL=%q HUBCELL_CLI_PATH=%q CALLBACK_URL=%q SERVER_ADDR=%q UPLOAD_ADDR=%q DATA_DIR=%q LOG_DIR=%q MAX_CONCURRENT_BUILDS=%d LOG_RETENTION_DAYS=%d UPDATE_LOCKFILE=%s CALLBACK_SECRET=%s",
+		"Config: HUBCELL_BASE_URL=%q HUBCELL_CLI_PATH=%q CALLBACK_URL=%q SERVER_ADDR=%q DATA_DIR=%q LOG_DIR=%q MAX_CONCURRENT_BUILDS=%d LOG_RETENTION_DAYS=%d UPDATE_LOCKFILE=%s CALLBACK_SECRET=%s",
 		config.HubcellBaseURL,
 		config.HubcellCLIPath,
 		config.CallbackURL,
 		config.ServerAddr,
-		config.UploadAddr,
 		config.DataDir,
 		config.LogDir,
 		config.MaxConcurrentBuilds,
@@ -312,14 +301,6 @@ func main() {
 	apiClient := api.NewClient(callbackURL, config.CallbackSecret)
 	manager := executor.NewManager(storage, logManager, allowedCommands, apiClient, config.MaxConcurrentBuilds, config.UpdateLockfile)
 	go manager.Start()
-
-	uploadServer := uploadserver.NewServer(callbackURL, config.CallbackSecret)
-	go func() {
-		log.Printf("Image upload server listening on %s", config.UploadAddr)
-		if err := uploadServer.Start(config.UploadAddr); err != nil {
-			log.Fatalf("could not start image upload server: %s\n", err)
-		}
-	}()
 
 	server := server.NewServer(storage, logManager, manager, allowedCommands, callbackURL, config.CallbackSecret)
 
