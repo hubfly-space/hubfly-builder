@@ -660,7 +660,7 @@ func signPayload(secret, timestamp, eventID string, body []byte) string {
 	return fmt.Sprintf("v1=%s", hex.EncodeToString(mac.Sum(nil)))
 }
 
-func (s *Server) generateImageTag(projectID string, buildID string) string {
+func normalizeUploadImageCoordinates(projectID string, buildID string) (string, string, string) {
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	projectID = sanitizeImageComponent(projectID)
 	buildID = sanitizeImageComponent(buildID)
@@ -670,7 +670,18 @@ func (s *Server) generateImageTag(projectID string, buildID string) string {
 	if buildID == "" {
 		buildID = "upload"
 	}
-	return fmt.Sprintf("127.0.0.1:10017/%s:%s-%s", projectID, buildID, ts)
+	tag := fmt.Sprintf("%s-%s", buildID, ts)
+	return projectID, buildID, tag
+}
+
+func (s *Server) generateImageTag(projectID string, buildID string) string {
+	projectID, _, tag := normalizeUploadImageCoordinates(projectID, buildID)
+	return fmt.Sprintf("hubcell.local/%s:%s", projectID, tag)
+}
+
+func (s *Server) generateRegistryPushTag(projectID string, buildID string) string {
+	projectID, _, tag := normalizeUploadImageCoordinates(projectID, buildID)
+	return fmt.Sprintf("127.0.0.1:10017/%s:%s", projectID, tag)
 }
 
 func writeRequestBodyToTemp(body io.ReadCloser, buildID string) (string, func(), error) {
@@ -719,17 +730,17 @@ func pushUploadedImageArchive(
 		return "", fmt.Errorf("failed to load uploaded image archive: %w", err)
 	}
 
-	destTagName := (&Server{}).generateImageTag(projectID, buildID)
-	destTag, err := name.NewTag(destTagName, name.WeakValidation, name.Insecure)
+	pushTagName := (&Server{}).generateRegistryPushTag(projectID, buildID)
+	pushTag, err := name.NewTag(pushTagName, name.WeakValidation, name.Insecure)
 	if err != nil {
-		return "", fmt.Errorf("invalid destination image tag %q: %w", destTagName, err)
+		return "", fmt.Errorf("invalid destination image tag %q: %w", pushTagName, err)
 	}
 
-	if err := remote.Write(destTag, img, remote.WithContext(context.Background())); err != nil {
+	if err := remote.Write(pushTag, img, remote.WithContext(context.Background())); err != nil {
 		return "", fmt.Errorf("failed to push uploaded image into hubcell registry: %w", err)
 	}
 
-	return destTag.Name(), nil
+	return (&Server{}).generateImageTag(projectID, buildID), nil
 }
 
 func resolveTarballSourceTag(archivePath string, sourceImage string) (*name.Tag, error) {
