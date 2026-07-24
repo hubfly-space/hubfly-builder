@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,6 +27,7 @@ const (
 	defaultHubcellCLIPath   = "/usr/local/bin/hubcell"
 	defaultCallbackURL      = "https://api.hubfly.space/api/builds/callback"
 	defaultServerAddr       = ":10008"
+	defaultHealthAddr       = ":60002"
 	defaultDataDir          = "./data"
 	defaultLogDir           = "./log"
 	defaultGlobalDataDir    = "/var/lib/hubfly-builder"
@@ -42,6 +44,7 @@ type EnvConfig struct {
 	HubcellCLIPath      string `json:"HUBCELL_CLI_PATH"`
 	CallbackURL         string `json:"CALLBACK_URL"`
 	ServerAddr          string `json:"SERVER_ADDR"`
+	HealthAddr          string `json:"HEALTH_ADDR"`
 	DataDir             string `json:"DATA_DIR"`
 	LogDir              string `json:"LOG_DIR"`
 	MaxConcurrentBuilds int    `json:"MAX_CONCURRENT_BUILDS"`
@@ -56,6 +59,7 @@ func defaultEnvConfig() EnvConfig {
 		HubcellCLIPath:      defaultHubcellCLIPath,
 		CallbackURL:         defaultCallbackURL,
 		ServerAddr:          defaultServerAddr,
+		HealthAddr:          defaultHealthAddr,
 		DataDir:             defaultDataDir,
 		LogDir:              defaultLogDir,
 		MaxConcurrentBuilds: defaultConcurrentBuilds,
@@ -153,6 +157,9 @@ func mergeEnvConfig(dst *EnvConfig, src EnvConfig) {
 	if src.ServerAddr != "" {
 		dst.ServerAddr = src.ServerAddr
 	}
+	if src.HealthAddr != "" {
+		dst.HealthAddr = src.HealthAddr
+	}
 	if src.DataDir != "" {
 		dst.DataDir = src.DataDir
 	}
@@ -185,6 +192,9 @@ func applyEnvironmentOverrides(config *EnvConfig) {
 	}
 	if value := os.Getenv("SERVER_ADDR"); value != "" {
 		config.ServerAddr = value
+	}
+	if value := os.Getenv("HEALTH_ADDR"); value != "" {
+		config.HealthAddr = value
 	}
 	if value := os.Getenv("DATA_DIR"); value != "" {
 		config.DataDir = value
@@ -303,6 +313,13 @@ func main() {
 	go manager.Start()
 
 	server := server.NewServer(storage, logManager, manager, allowedCommands, callbackURL, config.CallbackSecret)
+
+	go func() {
+		log.Printf("Health check listening on %s", config.HealthAddr)
+		if err := http.ListenAndServe(config.HealthAddr, server.HealthHandler()); err != nil {
+			log.Printf("ERROR: health check server failed: %v", err)
+		}
+	}()
 
 	log.Printf("Server listening on %s", config.ServerAddr)
 	if err := server.Start(config.ServerAddr); err != nil {

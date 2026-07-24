@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -554,6 +555,35 @@ func (s *Server) ResetDatabaseHandler(w http.ResponseWriter, r *http.Request) {
 func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "healthy")
+}
+
+// health reports overall service health, including the sqlite database. It
+// intentionally never surfaces error text or other internal detail to the
+// caller - only a generic status.
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	status := "ok"
+	code := http.StatusOK
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := s.storage.Ping(ctx); err != nil {
+		status = "degraded"
+		code = http.StatusServiceUnavailable
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+}
+
+// HealthHandler returns a minimal, unauthenticated mux for the dedicated
+// health-check port, separate from the main API listener.
+func (s *Server) HealthHandler() http.Handler {
+	r := mux.NewRouter()
+	r.HandleFunc("/health", s.health).Methods("GET")
+	r.HandleFunc("/healthz", s.health).Methods("GET")
+	return r
 }
 
 func copyStringMap(values map[string]string) map[string]string {

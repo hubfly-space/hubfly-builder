@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
@@ -30,6 +31,11 @@ func NewStorage(dbPath string) (*Storage, error) {
 	}
 
 	return &Storage{db: db}, nil
+}
+
+// Ping verifies the database connection is alive.
+func (s *Storage) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
 }
 
 func createTables(db *sql.DB) error {
