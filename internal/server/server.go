@@ -28,15 +28,16 @@ import (
 	"hubfly-builder/internal/envplan"
 	"hubfly-builder/internal/executor"
 	"hubfly-builder/internal/logs"
+	"hubfly-builder/internal/sourceguard"
 	"hubfly-builder/internal/storage"
 )
 
 type Server struct {
-	storage    *storage.Storage
-	logManager *logs.LogManager
-	manager    *executor.Manager
-	allowlist  *allowlist.AllowedCommands
-	callbackURL   string
+	storage        *storage.Storage
+	logManager     *logs.LogManager
+	manager        *executor.Manager
+	allowlist      *allowlist.AllowedCommands
+	callbackURL    string
 	callbackSecret string
 }
 
@@ -44,11 +45,11 @@ var credentialURLPattern = regexp.MustCompile(`https?://[^@\s]+@`)
 
 func NewServer(storage *storage.Storage, logManager *logs.LogManager, manager *executor.Manager, allowlist *allowlist.AllowedCommands, callbackURL string, callbackSecret string) *Server {
 	return &Server{
-		storage:    storage,
-		logManager: logManager,
-		manager:    manager,
-		allowlist:  allowlist,
-		callbackURL:   callbackURL,
+		storage:        storage,
+		logManager:     logManager,
+		manager:        manager,
+		allowlist:      allowlist,
+		callbackURL:    callbackURL,
 		callbackSecret: callbackSecret,
 	}
 }
@@ -109,6 +110,11 @@ func (s *Server) CreateJobHandler(w http.ResponseWriter, r *http.Request) {
 	if len(job.BuildConfig.Env) == 0 && len(job.Env) > 0 {
 		job.BuildConfig.Env = copyStringMap(job.Env)
 	}
+	if err := normalizeJobSourceInfo(&job); err != nil {
+		log.Printf("ERROR: job %s invalid source info: %v", job.ID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if job.BuildConfig.IsAutoBuild {
 		// For auto-build, we need to clone the repo first to inspect it.
@@ -122,7 +128,7 @@ func (s *Server) CreateJobHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		defer os.RemoveAll(tempDir)
 
-		cloneCmd := exec.Command("git", "clone", job.SourceInfo.GitRepository, tempDir)
+		cloneCmd := exec.Command("git", "clone", "--", job.SourceInfo.GitRepository, tempDir)
 		if output, err := cloneCmd.CombinedOutput(); err != nil {
 			log.Printf(
 				"ERROR: job %s failed to clone repository repo=%s err=%v output=%s",
@@ -366,6 +372,25 @@ func sanitizeCommandOutput(raw string) string {
 	})
 }
 
+func normalizeJobSourceInfo(job *storage.BuildJob) error {
+	repository, err := sourceguard.NormalizeGitRepository(job.SourceInfo.GitRepository)
+	if err != nil {
+		return err
+	}
+	ref, err := sourceguard.NormalizeGitRef(job.SourceInfo.Ref)
+	if err != nil {
+		return err
+	}
+	commitSHA, err := sourceguard.NormalizeCommitSHA(job.SourceInfo.CommitSha)
+	if err != nil {
+		return err
+	}
+	job.SourceInfo.GitRepository = repository
+	job.SourceInfo.Ref = ref
+	job.SourceInfo.CommitSha = commitSHA
+	return nil
+}
+
 func resolveWorkingDirectory(repoRoot, workingDir string) (string, string, error) {
 	trimmed := strings.TrimSpace(workingDir)
 	if trimmed == "" || trimmed == "." {
@@ -373,7 +398,7 @@ func resolveWorkingDirectory(repoRoot, workingDir string) (string, string, error
 	}
 
 	cleaned := filepath.Clean(trimmed)
-	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+	if !filepath.IsLocal(cleaned) {
 		return "", "", fmt.Errorf("working directory must stay within the repository root")
 	}
 
@@ -403,7 +428,7 @@ func resolveBuildContextPath(repoRoot, buildContextDir string) (string, error) {
 	}
 
 	cleaned := filepath.Clean(trimmed)
-	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+	if !filepath.IsLocal(cleaned) {
 		return "", fmt.Errorf("build context must stay within the repository root")
 	}
 
@@ -415,7 +440,7 @@ func normalizeDockerfileBuildContextDir(buildContextDir, appDir string) (string,
 	if cleaned == "" || cleaned == "." {
 		cleaned = "."
 	}
-	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+	if !filepath.IsLocal(cleaned) {
 		return "", fmt.Errorf("build context must stay within the repository root")
 	}
 
@@ -648,18 +673,18 @@ type gatewaySubmitBuildInput struct {
 }
 
 type runtimeBuildInspection struct {
-	BuildID       string     `json:"buildId"`
-	Status        string     `json:"status"`
-	ImageTag      *string    `json:"imageTag"`
-	CommitSha     *string    `json:"commitSha"`
-	Ref           *string    `json:"ref"`
-	StartedAt     *time.Time `json:"startedAt"`
-	FinishedAt    *time.Time `json:"finishedAt"`
-	DurationMs    *int64     `json:"durationMs"`
-	Error         *string    `json:"error"`
-	ExitCode      *int64     `json:"exitCode"`
-	ArtifactURL   *string    `json:"artifactUrl"`
-	BuilderVersion *string   `json:"builderVersion"`
+	BuildID        string     `json:"buildId"`
+	Status         string     `json:"status"`
+	ImageTag       *string    `json:"imageTag"`
+	CommitSha      *string    `json:"commitSha"`
+	Ref            *string    `json:"ref"`
+	StartedAt      *time.Time `json:"startedAt"`
+	FinishedAt     *time.Time `json:"finishedAt"`
+	DurationMs     *int64     `json:"durationMs"`
+	Error          *string    `json:"error"`
+	ExitCode       *int64     `json:"exitCode"`
+	ArtifactURL    *string    `json:"artifactUrl"`
+	BuilderVersion *string    `json:"builderVersion"`
 }
 
 // ─── Status mapping ────────────────────────────────────────────────────────────
@@ -728,9 +753,9 @@ func (s *Server) CreateBuildV1Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := &storage.BuildJob{
-		ID:        input.BuildID,
-		ProjectID: input.ProjectID,
-		UserID:    input.UserID,
+		ID:         input.BuildID,
+		ProjectID:  input.ProjectID,
+		UserID:     input.UserID,
 		SourceType: "git",
 		SourceInfo: storage.SourceInfo{
 			GitRepository: input.Source.Repository,
@@ -756,13 +781,20 @@ func (s *Server) CreateBuildV1Handler(w http.ResponseWriter, r *http.Request) {
 				CPU:      input.ResourceLimits.CPU,
 				MemoryMB: input.ResourceLimits.MemoryMB,
 			},
-			Env:               env,
-			CustomDockerfile:  input.Build.DockerfileContent,
+			Env:              env,
+			CustomDockerfile: input.Build.DockerfileContent,
 		},
 		Env: env,
 	}
 	if input.Build.DockerfileContent != "" {
 		job.BuildConfig.CustomDockerfile = input.Build.DockerfileContent
+	}
+	if err := normalizeJobSourceInfo(job); err != nil {
+		log.Printf("ERROR: gateway build %s invalid source info: %v", job.ID, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": err.Error()})
+		return
 	}
 
 	log.Printf(
@@ -939,17 +971,17 @@ func buildJobToInspection(job *storage.BuildJob) *runtimeBuildInspection {
 	}
 
 	return &runtimeBuildInspection{
-		BuildID:       job.ID,
-		Status:        status,
-		ImageTag:      imageTag,
-		CommitSha:     commitSha,
-		Ref:           ref,
-		StartedAt:     startedAt,
-		FinishedAt:    finishedAt,
-		DurationMs:    durationMs,
-		Error:         errorStr,
-		ExitCode:      exitCode,
-		ArtifactURL:   nil,
+		BuildID:        job.ID,
+		Status:         status,
+		ImageTag:       imageTag,
+		CommitSha:      commitSha,
+		Ref:            ref,
+		StartedAt:      startedAt,
+		FinishedAt:     finishedAt,
+		DurationMs:     durationMs,
+		Error:          errorStr,
+		ExitCode:       exitCode,
+		ArtifactURL:    nil,
 		BuilderVersion: nil,
 	}
 }

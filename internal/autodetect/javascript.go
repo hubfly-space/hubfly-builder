@@ -366,10 +366,7 @@ func normalizeRelativeDir(dir string) (string, error) {
 	}
 
 	cleaned := filepath.Clean(dir)
-	if filepath.IsAbs(cleaned) {
-		return "", fmt.Errorf("working directory must be relative")
-	}
-	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+	if !filepath.IsLocal(cleaned) {
 		return "", fmt.Errorf("working directory escapes repository root")
 	}
 

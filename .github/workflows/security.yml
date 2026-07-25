@@ -8,6 +8,9 @@ on:
   schedule:
     - cron: '30 4 * * 1' # Weekly on Monday at 04:30
 
+permissions:
+  contents: read
+
 jobs:
   govulncheck:
     runs-on: ubuntu-latest

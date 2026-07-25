@@ -23,6 +23,7 @@ import (
 	"hubfly-builder/internal/driver"
 	"hubfly-builder/internal/envplan"
 	"hubfly-builder/internal/logs"
+	"hubfly-builder/internal/sourceguard"
 	"hubfly-builder/internal/storage"
 )
 
@@ -99,7 +100,11 @@ func (w *Worker) Run() error {
 		w.log("ERROR: no user network provided")
 		return w.failJob("no user network provided")
 	}
-	cloneCmd := w.execCommand("git", "clone", w.job.SourceInfo.GitRepository, w.workDir)
+	if err := w.normalizeSourceInfo(); err != nil {
+		w.log("ERROR: invalid source info: %v", err)
+		return w.failJob("invalid source info")
+	}
+	cloneCmd := w.execCommand("git", "clone", "--", w.job.SourceInfo.GitRepository, w.workDir)
 	if err := w.executeCommand(cloneCmd); err != nil {
 		w.log("ERROR: failed to clone repository: %v", err)
 		return w.failForStep(err, "failed to clone repository")
@@ -747,6 +752,25 @@ func hubcellCLIPathFromEnv() string {
 	return strings.TrimSpace(os.Getenv("HUBCELL_CLI_PATH"))
 }
 
+func (w *Worker) normalizeSourceInfo() error {
+	repository, err := sourceguard.NormalizeGitRepository(w.job.SourceInfo.GitRepository)
+	if err != nil {
+		return err
+	}
+	ref, err := sourceguard.NormalizeGitRef(w.job.SourceInfo.Ref)
+	if err != nil {
+		return err
+	}
+	commitSHA, err := sourceguard.NormalizeCommitSHA(w.job.SourceInfo.CommitSha)
+	if err != nil {
+		return err
+	}
+	w.job.SourceInfo.GitRepository = repository
+	w.job.SourceInfo.Ref = ref
+	w.job.SourceInfo.CommitSha = commitSHA
+	return nil
+}
+
 func resolveWorkspacePath(repoRoot, workingDir string) (string, string, error) {
 	trimmed := strings.TrimSpace(workingDir)
 	if trimmed == "" || trimmed == "." {
@@ -754,7 +778,7 @@ func resolveWorkspacePath(repoRoot, workingDir string) (string, string, error) {
 	}
 
 	cleaned := filepath.Clean(trimmed)
-	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+	if !filepath.IsLocal(cleaned) {
 		return "", "", fmt.Errorf("working directory must stay within the repository root")
 	}
 
@@ -768,7 +792,7 @@ func resolveBuildContextPath(repoRoot, buildContextDir string) (string, error) {
 	}
 
 	cleaned := filepath.Clean(buildContextDir)
-	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+	if !filepath.IsLocal(cleaned) {
 		return "", fmt.Errorf("build context must stay within the repository root")
 	}
 
@@ -780,7 +804,7 @@ func normalizeDockerfileBuildContextDir(buildContextDir, appDir string) (string,
 	if cleaned == "" || cleaned == "." {
 		cleaned = "."
 	}
-	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+	if !filepath.IsLocal(cleaned) {
 		return "", fmt.Errorf("build context must stay within the repository root")
 	}
 
