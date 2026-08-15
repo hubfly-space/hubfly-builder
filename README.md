@@ -90,7 +90,7 @@ When `isAutoBuild` is set to `true`, the builder inspects the repository root (o
 | **Python**  | `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` | `python:3.14.4-slim`                              |
 | **Java**    | `pom.xml`, `build.gradle`, `build.gradle.kts`               | `maven:3.9-eclipse-temurin-17` / `gradle:8-jdk17` |
 | **Static**  | `index.html`                                                | `nginx:alpine`                                    |
-| **PHP**     | `composer.json`                                             | `php:8.3-apache` / `php:8.3-fpm` / `php:8.3-cli`  |
+| **PHP**     | `composer.json`                                             | `php:8.3-apache` / `php:8.3-fpm-trixie` / `php:8.3-cli`  |
 
 If a `Dockerfile` exists in the context, it takes precedence over auto-detection.
 
@@ -399,7 +399,7 @@ For each job, the builder:
 - clones the repository into a temporary workspace
 - generates or stages the Dockerfile when needed
 - generates a `hubcell.local/<user>/<project>:<source>-b<job>-v<timestamp>` image tag
-- runs `sudo <HUBCELL_CLI_PATH> build --verbose --cap-add CHOWN --cap-add FOWNER --cap-add FSETID --cap-add SETUID --cap-add SETGID -t <generated-image-tag> --network <request-buildConfig.network> -m <bytes> --cpu-period <period> --cpu-quota <quota> --rootfs-initial-size 10g <dockerfile-directory>`
+- runs `sudo <HUBCELL_CLI_PATH> build --verbose -t <generated-image-tag> --network <request-buildConfig.network> -m <bytes> --cpu-period <period> --cpu-quota <quota> --rootfs-initial-size 10g <dockerfile-directory>` without adding Linux capabilities
 - records the resulting image tag
 - removes the temporary workspace
 
@@ -511,11 +511,6 @@ To test a build manually using the configured Hubcell CLI:
 ```bash
 sudo "$HUBCELL_CLI_PATH" build \
   --verbose \
-  --cap-add CHOWN \
-  --cap-add FOWNER \
-  --cap-add FSETID \
-  --cap-add SETUID \
-  --cap-add SETGID \
   -t hubcell.local/test-image:latest \
   --network project-network-demo \
   -m 4294967296 \
