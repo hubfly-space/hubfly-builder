@@ -815,6 +815,9 @@ func renderDotnetDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []stri
 
 func renderPHPDockerfile(plan buildPlan, buildArgKeys, secretBuildKeys []string) string {
 	var builder strings.Builder
+	if strings.TrimSpace(plan.RuntimeFlavor) == "fpm" {
+		builder.WriteString("FROM nginx:stable-trixie AS hubfly_nginx\n\n")
+	}
 	fmt.Fprintf(&builder, "FROM %s\n\n", strings.TrimSpace(plan.BuilderImage))
 	builder.WriteString("WORKDIR /app\n\n")
 	builder.WriteString("COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer\n\n")
@@ -1242,7 +1245,8 @@ func renderAptInstallLine(packages []string) string {
 	if len(packages) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("RUN apt-get update && apt-get install -y --no-install-recommends %s && rm -rf /var/lib/apt/lists/*\n", strings.Join(packages, " "))
+	const aptOptions = "-o APT::Sandbox::User=root -o Dir::State::lists=/tmp/hubfly-apt/lists -o Dir::Cache::archives=/tmp/hubfly-apt/archives"
+	return fmt.Sprintf("RUN mkdir -p /tmp/hubfly-apt/lists/partial /tmp/hubfly-apt/archives/partial && apt-get %s update && apt-get %s install -y --no-install-recommends %s && rm -rf /tmp/hubfly-apt\n", aptOptions, aptOptions, strings.Join(packages, " "))
 }
 
 func escapeSingleQuotes(value string) string {
@@ -1278,6 +1282,30 @@ func renderPHPFPMNginxTemplate(docroot string) string {
 	}
 
 	var builder strings.Builder
+	builder.WriteString("COPY --from=hubfly_nginx /usr/sbin/nginx /usr/sbin/nginx\n")
+	builder.WriteString("COPY --from=hubfly_nginx /etc/nginx/mime.types /etc/nginx/mime.types\n")
+	builder.WriteString("COPY --from=hubfly_nginx /etc/nginx/fastcgi_params /etc/nginx/fastcgi_params\n\n")
+	builder.WriteString("RUN mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/templates /tmp/nginx && ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default\n")
+	builder.WriteString("RUN cat <<'EOF' > /etc/nginx/nginx.conf\n")
+	builder.WriteString("user root;\n")
+	builder.WriteString("worker_processes auto;\n")
+	builder.WriteString("pid /tmp/nginx.pid;\n")
+	builder.WriteString("error_log stderr notice;\n")
+	builder.WriteString("events { worker_connections 1024; }\n")
+	builder.WriteString("http {\n")
+	builder.WriteString("  include /etc/nginx/mime.types;\n")
+	builder.WriteString("  default_type application/octet-stream;\n")
+	builder.WriteString("  access_log off;\n")
+	builder.WriteString("  sendfile on;\n")
+	builder.WriteString("  keepalive_timeout 65;\n")
+	builder.WriteString("  client_body_temp_path /tmp/nginx/client_temp;\n")
+	builder.WriteString("  proxy_temp_path /tmp/nginx/proxy_temp;\n")
+	builder.WriteString("  fastcgi_temp_path /tmp/nginx/fastcgi_temp;\n")
+	builder.WriteString("  uwsgi_temp_path /tmp/nginx/uwsgi_temp;\n")
+	builder.WriteString("  scgi_temp_path /tmp/nginx/scgi_temp;\n")
+	builder.WriteString("  include /etc/nginx/sites-enabled/*;\n")
+	builder.WriteString("}\n")
+	builder.WriteString("EOF\n")
 	builder.WriteString("RUN mkdir -p /etc/nginx/templates && cat <<'EOF' > /etc/nginx/templates/hubfly-default.conf.template\n")
 	builder.WriteString("server {\n")
 	builder.WriteString("  listen 0.0.0.0:__PORT__;\n")
@@ -1288,7 +1316,8 @@ func renderPHPFPMNginxTemplate(docroot string) string {
 	builder.WriteString("    try_files $uri $uri/ /index.php?$query_string;\n")
 	builder.WriteString("  }\n")
 	builder.WriteString("  location ~ \\.php$ {\n")
-	builder.WriteString("    include snippets/fastcgi-php.conf;\n")
+	builder.WriteString("    try_files $uri =404;\n")
+	builder.WriteString("    include /etc/nginx/fastcgi_params;\n")
 	builder.WriteString("    fastcgi_pass 127.0.0.1:9000;\n")
 	builder.WriteString("    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n")
 	builder.WriteString("  }\n")
