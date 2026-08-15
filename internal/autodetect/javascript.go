@@ -556,6 +556,9 @@ func detectJavaScriptInstallCommand(ctx jsProjectContext) string {
 	case "yarn":
 		return "yarn install"
 	default:
+		if fileExists(filepath.Join(ctx.BuildContextPath, "package-lock.json")) || fileExists(filepath.Join(ctx.AppPath, "package-lock.json")) || fileExists(filepath.Join(ctx.BuildContextPath, "npm-shrinkwrap.json")) || fileExists(filepath.Join(ctx.AppPath, "npm-shrinkwrap.json")) {
+			return "npm ci"
+		}
 		return "npm install"
 	}
 }
@@ -770,6 +773,15 @@ func shouldUseStaticRuntime(ctx jsProjectContext, framework, buildScript, runScr
 	if strings.TrimSpace(buildScript) == "" {
 		return false
 	}
+	// An explicit production server script is authoritative. Framework defaults
+	// such as Vite preview or Astro static output must not discard it.
+	runBody := ""
+	if runScript != "" && ctx.AppMetadata != nil {
+		runBody = strings.ToLower(strings.TrimSpace(ctx.AppMetadata.Scripts[runScript]))
+	}
+	if runBody != "" && !strings.Contains(runBody, "preview") && !strings.Contains(runBody, "vite") {
+		return false
+	}
 	if isReactRouterApp(ctx) {
 		return !detectRemixSSR(ctx)
 	}
@@ -804,15 +816,6 @@ func shouldUseStaticRuntime(ctx jsProjectContext, framework, buildScript, runScr
 		return false
 	}
 	if hasAnyPackage(ctx.AppMetadata, "sails") {
-		return false
-	}
-
-	runBody := ""
-	if runScript != "" && ctx.AppMetadata != nil {
-		runBody = strings.ToLower(strings.TrimSpace(ctx.AppMetadata.Scripts[runScript]))
-	}
-	// Keep Node/Bun runtime when an explicit production run script exists.
-	if runBody != "" && !strings.Contains(runBody, "preview") && !strings.Contains(runBody, "vite") {
 		return false
 	}
 
