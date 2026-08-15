@@ -423,9 +423,6 @@ func applyPHPPlanDefaults(appPath string, plan *buildPlan) error {
 		plan.BootstrapCommands = mergeUniqueCommands(plan.BootstrapCommands, nodeBootstrap)
 		plan.SetupCommands = mergeUniqueCommands(plan.SetupCommands, nodeSetup)
 	}
-	if plan.RuntimeFlavor == "fpm" {
-		plan.AptPackages = appendUniqueString(plan.AptPackages, "nginx")
-	}
 	plan.BootstrapCommands = mergeUniqueCommands(plan.BootstrapCommands, detectPHPBootstrapCommands(metadata, plan.RuntimeFlavor))
 	plan.ValidationWarnings = mergeUniqueCommands(plan.ValidationWarnings, detectPHPValidationWarnings(metadata))
 
@@ -544,7 +541,7 @@ func selectPHPBaseImage(version, runtimeFlavor string) string {
 	case "apache":
 		return "php:" + version + "-apache"
 	case "fpm":
-		return "php:" + version + "-fpm"
+		return "php:" + version + "-fpm-trixie"
 	default:
 		return "php:" + version + "-cli"
 	}
