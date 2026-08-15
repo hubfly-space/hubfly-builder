@@ -498,7 +498,7 @@ Use this command for **all subsequent deployments** when you only need to push a
 - Cross-compiles the Linux binary locally.
 - Checks the remote server for the active lockfile (`/run/hubfly-builder-update.lock`). If a build is running, it will automatically pause and wait for it to finish, ensuring no jobs are interrupted.
 - Once safe, it stops the service, updates the binary, and restarts it.
-- **Safety**: If it detects the systemd service has not been installed yet, it will warn you to run `make deploy-full` instead.
+- **Safety**: If it detects the systemd service has not been installed yet, it will warn you to run `make deploy-full` instead
 
 ---
 
