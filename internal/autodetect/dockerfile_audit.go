@@ -92,7 +92,7 @@ func AuditDockerfileWithOptions(opts AutoDetectOptions, dockerfilePath string) D
 		}
 		if runtime == "python" {
 			requiredPackages := detectPythonSystemPackages(appPath)
-			if len(requiredPackages) > 0 && !strings.Contains(lower, "apt-get install") && !strings.Contains(lower, "apk add") && !strings.Contains(lower, "yum install") && !strings.Contains(lower, "dnf install") {
+			if len(requiredPackages) > 0 && !containsAptInstallCommand(lower) && !strings.Contains(lower, "apk add") && !strings.Contains(lower, "yum install") && !strings.Contains(lower, "dnf install") {
 				result.Warnings = append(result.Warnings, "Python dependencies suggest additional system packages, but the Dockerfile does not appear to install any")
 			}
 			if len(detectPythonSetupCommands(appPath)) > 0 && !strings.Contains(lower, "python -m playwright install") {
@@ -142,6 +142,24 @@ func AuditDockerfileWithOptions(opts AutoDetectOptions, dockerfilePath string) D
 	result.Warnings = uniqueSortedStrings(result.Warnings)
 	result.Errors = uniqueSortedStrings(result.Errors)
 	return result
+}
+
+func containsAptInstallCommand(contents string) bool {
+	segments := strings.Split(contents, "apt-get")
+	for _, segment := range segments[1:] {
+		end := len(segment)
+		for _, separator := range []string{"&&", "||", ";", "\n", "|"} {
+			if index := strings.Index(segment, separator); index >= 0 && index < end {
+				end = index
+			}
+		}
+		for _, field := range strings.Fields(segment[:end]) {
+			if field == "install" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func uniqueSortedStrings(values []string) []string {
