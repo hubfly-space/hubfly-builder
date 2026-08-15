@@ -316,11 +316,11 @@ func TestAutoDetectBuildConfigJavaMaven(t *testing.T) {
 	if cfg.BuildCommand != "mvn install -DskipTests" {
 		t.Fatalf("expected maven build command, got %q", cfg.BuildCommand)
 	}
-	if cfg.RunCommand != "java -jar target/*.jar" {
+	if cfg.RunCommand != "java -jar app.jar" {
 		t.Fatalf("expected maven run command, got %q", cfg.RunCommand)
 	}
 	dockerfile := string(cfg.DockerfileContent)
-	if !strings.Contains(dockerfile, "FROM maven:3.9-eclipse-temurin-17") {
+	if !strings.Contains(dockerfile, "FROM maven:3.9-eclipse-temurin-21") {
 		t.Fatalf("expected maven base image in Dockerfile, got:\n%s", dockerfile)
 	}
 }
@@ -398,17 +398,17 @@ func TestAutoDetectBuildConfigJavaGradleWrapper(t *testing.T) {
 		t.Fatalf("AutoDetectBuildConfig returned error: %v", err)
 	}
 
-	if cfg.PrebuildCommand != "./gradlew dependencies" {
+	if cfg.PrebuildCommand != "chmod +x gradlew" {
 		t.Fatalf("expected gradle wrapper prebuild command, got %q", cfg.PrebuildCommand)
 	}
 	if cfg.BuildCommand != "./gradlew build -x test" {
 		t.Fatalf("expected gradle wrapper build command, got %q", cfg.BuildCommand)
 	}
-	if cfg.RunCommand != "java -jar build/libs/*.jar" {
+	if cfg.RunCommand != "java -jar app.jar" {
 		t.Fatalf("expected gradle run command, got %q", cfg.RunCommand)
 	}
 	dockerfile := string(cfg.DockerfileContent)
-	if !strings.Contains(dockerfile, "FROM gradle:8-jdk17") {
+	if !strings.Contains(dockerfile, "FROM gradle:8-jdk21") {
 		t.Fatalf("expected gradle base image in Dockerfile, got:\n%s", dockerfile)
 	}
 }
@@ -1192,7 +1192,7 @@ app = FastAPI()
 		t.Fatalf("expected fastapi framework, got %q", cfg.Framework)
 	}
 	dockerfile := string(cfg.DockerfileContent)
-	if !strings.Contains(dockerfile, "FROM python:3-alpine") {
+	if !strings.Contains(dockerfile, "FROM python:3.14.4-alpine") {
 		t.Fatalf("expected alpine python base image, got:\n%s", dockerfile)
 	}
 	if strings.Contains(dockerfile, "FROM python:3-slim AS builder") {
@@ -1386,7 +1386,7 @@ app = Flask(__name__)
 		t.Fatalf("expected flask gunicorn command, got %q", cfg.RunCommand)
 	}
 	dockerfile := string(cfg.DockerfileContent)
-	if !strings.Contains(dockerfile, "FROM python:3-alpine") {
+	if !strings.Contains(dockerfile, "FROM python:3.14.4-alpine") {
 		t.Fatalf("expected alpine python base image, got:\n%s", dockerfile)
 	}
 	if !strings.Contains(dockerfile, "ENV PYTHONUNBUFFERED=1") {
@@ -1587,10 +1587,10 @@ app = FastAPI()
 	}
 
 	dockerfile := string(cfg.DockerfileContent)
-	if !strings.Contains(dockerfile, "FROM python:3-slim") {
+	if !strings.Contains(dockerfile, "FROM python:3.14.4-slim") {
 		t.Fatalf("expected slim python base image for compiled deps, got:\n%s", dockerfile)
 	}
-	if strings.Contains(dockerfile, "FROM python:3-alpine") {
+	if strings.Contains(dockerfile, "FROM python:3.14.4-alpine") {
 		t.Fatalf("did not expect alpine python base image with numpy, got:\n%s", dockerfile)
 	}
 }
@@ -2563,6 +2563,39 @@ func TestFinalizeBuildConfigWithOptionsForcesStaticFrontendRuntime(t *testing.T)
 	}
 	if strings.Contains(dockerfile, "npm run preview") {
 		t.Fatalf("did not expect preview command in static Dockerfile:\n%s", dockerfile)
+	}
+}
+
+func TestGeneratedDockerfilesNeverRequestExtraPrivilege(t *testing.T) {
+	tests := []struct {
+		name, runtime, version, install, build, run string
+	}{
+		{"node", "node", "22", "npm ci", "npm run build", "npm start"},
+		{"bun", "bun", "1.2", "bun install", "bun run build", "bun run start"},
+		{"python", "python", "3.14.4", "pip install -r requirements.txt", "", "python app.py"},
+		{"elixir", "elixir", "1.17", "mix deps.get", "MIX_ENV=prod mix compile", "MIX_ENV=prod mix phx.server"},
+		{"go", "go", "1.23", "go mod download", "go build -o app .", "./app"},
+		{"rust", "rust", "1.80", "cargo fetch", "cargo build --release", "./app"},
+		{"dotnet", "dotnet", "9.0", "dotnet restore", "dotnet publish -c Release -o out", "dotnet App.dll"},
+		{"java", "java", "21", "mvn clean", "mvn install -DskipTests", "java -jar app.jar"},
+		{"php", "php", "8.3", "composer install", "", "php app.php"},
+		{"static", "static", "latest", "", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content, err := GenerateDockerfile(tt.runtime, tt.version, tt.install, tt.build, tt.run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lower := strings.ToLower(string(content))
+			for _, forbidden := range []string{
+				"--cap-add", "--cap-drop", "cap_add", "cap_drop", "security-opt", "privileged", "sys_admin", "net_admin", "setcap",
+			} {
+				if strings.Contains(lower, forbidden) {
+					t.Fatalf("generated %s Dockerfile contains forbidden privilege request %q:\n%s", tt.runtime, forbidden, content)
+				}
+			}
+		})
 	}
 }
 
