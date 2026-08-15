@@ -1097,7 +1097,7 @@ func nodePrebuildCandidates(repoPath, packageManager string) []string {
 		return []string{"yarn install"}
 	default:
 		if repoPath != "" && (fileExists(filepath.Join(repoPath, "package-lock.json")) || fileExists(filepath.Join(repoPath, "npm-shrinkwrap.json"))) {
-			return []string{"npm install", "npm ci"}
+			return []string{"npm ci", "npm install"}
 		}
 		return []string{"npm install", "npm ci"}
 	}
@@ -1265,15 +1265,16 @@ func detectJavaCommands(repoPath string, allowed *allowlist.AllowedCommands) (st
 			pickFirstAllowed(javaRunCandidates(repoPath, true), allowed.Run)
 	}
 
-	prebuildCandidates := []string{}
-	buildCandidates := []string{"mvn -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction", "mvn install -DskipTests"}
+	prebuildCandidates := []string{"mvn clean"}
+	buildCandidates := []string{"mvn install -DskipTests", "mvn -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction"}
+	if detectQuarkusProject(repoPath) {
+		buildCandidates = []string{"mvn -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction", "mvn install -DskipTests"}
+	}
 	if hasMavenWrapper {
 		prebuildCandidates = []string{"chmod +x mvnw"}
-		buildCandidates = []string{
-			"./mvnw -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction",
-			"./mvnw install -DskipTests",
-			"mvn -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction",
-			"mvn install -DskipTests",
+		buildCandidates = []string{"./mvnw install -DskipTests", "./mvnw -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction", "mvn install -DskipTests", "mvn -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction"}
+		if detectQuarkusProject(repoPath) {
+			buildCandidates = []string{"./mvnw -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction", "./mvnw install -DskipTests", "mvn -DoutputFile=target/mvn-dependency-list.log -B -DskipTests clean dependency:list install -Pproduction", "mvn install -DskipTests"}
 		}
 	}
 
@@ -1402,6 +1403,7 @@ func isPythonProject(repoPath string) bool {
 	}
 
 	return fileExists(filepath.Join(repoPath, "requirements.txt")) ||
+		fileExists(filepath.Join(repoPath, "requirements.in")) ||
 		fileExists(filepath.Join(repoPath, "pyproject.toml")) ||
 		fileExists(filepath.Join(repoPath, "setup.py")) ||
 		fileExists(filepath.Join(repoPath, "Pipfile"))
