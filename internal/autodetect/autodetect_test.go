@@ -1693,11 +1693,60 @@ func TestAutoDetectBuildConfigPythonPlaywrightAddsSystemDeps(t *testing.T) {
 	}
 
 	dockerfile := string(cfg.DockerfileContent)
-	if !strings.Contains(dockerfile, "apt-get install -y --no-install-recommends") {
+	if !strings.Contains(dockerfile, "Dir::Cache::archives=/tmp/hubfly-apt/archives install -y --no-install-recommends") {
 		t.Fatalf("expected apt install line in Dockerfile, got:\n%s", dockerfile)
 	}
 	if !strings.Contains(dockerfile, "RUN python -m playwright install chromium") {
 		t.Fatalf("expected playwright install RUN line, got:\n%s", dockerfile)
+	}
+}
+
+func TestRenderAptInstallLineDoesNotRequireIdentityCapabilities(t *testing.T) {
+	line := renderAptInstallLine([]string{"git", "ca-certificates", "git"})
+
+	for _, want := range []string{
+		"mkdir -p /tmp/hubfly-apt/lists/partial /tmp/hubfly-apt/archives/partial",
+		"apt-get -o APT::Sandbox::User=root -o Dir::State::lists=/tmp/hubfly-apt/lists -o Dir::Cache::archives=/tmp/hubfly-apt/archives update",
+		"apt-get -o APT::Sandbox::User=root -o Dir::State::lists=/tmp/hubfly-apt/lists -o Dir::Cache::archives=/tmp/hubfly-apt/archives install -y --no-install-recommends ca-certificates git",
+		"rm -rf /tmp/hubfly-apt",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("expected %q in APT install line, got %q", want, line)
+		}
+	}
+
+	for _, forbidden := range []string{"apt-get update", "apt-get install", "sudo", "setcap"} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("did not expect capability-dependent command %q in APT install line: %q", forbidden, line)
+		}
+	}
+}
+
+func TestRenderPHPFPMDockerfileCopiesNginxWithoutInstallingIt(t *testing.T) {
+	dockerfile := renderPHPDockerfile(buildPlan{
+		Runtime:       "php",
+		RuntimeFlavor: "fpm",
+		BuilderImage:  "php:8.3-fpm-trixie",
+		AptPackages:   []string{"git", "unzip"},
+		DocumentRoot:  "public",
+		ExposePort:    "8080",
+		RunCommand:    "php-fpm -D && exec nginx -g 'daemon off;'",
+	}, nil, nil)
+
+	for _, want := range []string{
+		"FROM nginx:stable-trixie AS hubfly_nginx",
+		"FROM php:8.3-fpm-trixie",
+		"COPY --from=hubfly_nginx /usr/sbin/nginx /usr/sbin/nginx",
+		"COPY --from=hubfly_nginx /etc/nginx/fastcgi_params /etc/nginx/fastcgi_params",
+		"include /etc/nginx/sites-enabled/*;",
+		"fastcgi_pass 127.0.0.1:9000;",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Fatalf("expected %q in PHP FPM Dockerfile, got:\n%s", want, dockerfile)
+		}
+	}
+	if strings.Contains(dockerfile, "--no-install-recommends git nginx unzip") {
+		t.Fatalf("did not expect nginx to be installed through APT, got:\n%s", dockerfile)
 	}
 }
 
@@ -2163,8 +2212,10 @@ func TestAutoDetectBuildConfigPHPFPMNginxModeAndPECL(t *testing.T) {
 	}
 	dockerfile := string(cfg.DockerfileContent)
 	for _, snippet := range []string{
-		"FROM php:8.3-fpm",
-		"apt-get install -y --no-install-recommends $PHPIZE_DEPS git imagemagick libmagickwand-dev nginx unzip",
+		"FROM nginx:stable-trixie AS hubfly_nginx",
+		"FROM php:8.3-fpm-trixie",
+		"COPY --from=hubfly_nginx /usr/sbin/nginx /usr/sbin/nginx",
+		"Dir::Cache::archives=/tmp/hubfly-apt/archives install -y --no-install-recommends $PHPIZE_DEPS git imagemagick libmagickwand-dev unzip",
 		"RUN printf \"\\n\" | pecl install imagick",
 		"RUN printf \"\\n\" | pecl install redis",
 		"RUN docker-php-ext-enable imagick redis",
@@ -2174,6 +2225,9 @@ func TestAutoDetectBuildConfigPHPFPMNginxModeAndPECL(t *testing.T) {
 		if !strings.Contains(dockerfile, snippet) {
 			t.Fatalf("expected Dockerfile to contain %q, got:\n%s", snippet, dockerfile)
 		}
+	}
+	if strings.Contains(dockerfile, "--no-install-recommends $PHPIZE_DEPS git imagemagick libmagickwand-dev nginx unzip") {
+		t.Fatalf("did not expect nginx to be installed through APT, got:\n%s", dockerfile)
 	}
 }
 
@@ -2266,7 +2320,7 @@ func TestAutoDetectBuildConfigPHPHtaccessPrefersApacheOverNginxHint(t *testing.T
 			t.Fatalf("expected Dockerfile to contain %q, got:\n%s", snippet, dockerfile)
 		}
 	}
-	if strings.Contains(dockerfile, "FROM php:8.3-fpm") {
+	if strings.Contains(dockerfile, "FROM php:8.3-fpm-trixie") {
 		t.Fatalf("did not expect fpm image when .htaccess is present, got:\n%s", dockerfile)
 	}
 }
@@ -2296,7 +2350,7 @@ func TestFinalizeBuildConfigWithOptionsSupportsManualPHPFPMMode(t *testing.T) {
 	if cfg.ExposePort != "9090" {
 		t.Fatalf("expected submitted expose port 9090, got %q", cfg.ExposePort)
 	}
-	if !strings.Contains(string(cfg.DockerfileContent), "FROM php:8.3-fpm") {
+	if !strings.Contains(string(cfg.DockerfileContent), "FROM php:8.3-fpm-trixie") {
 		t.Fatalf("expected fpm image in Dockerfile, got:\n%s", string(cfg.DockerfileContent))
 	}
 	if !strings.Contains(cfg.RuntimeInitCommand, "${PORT:-9090}") {
