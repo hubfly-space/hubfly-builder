@@ -433,6 +433,12 @@ func isTrustedGeneratedCommand(command string) bool {
 	if command == "" {
 		return false
 	}
+	if strings.HasPrefix(command, laravelRuntimeInitCommand()+"; ") {
+		remainder := strings.TrimPrefix(command, laravelRuntimeInitCommand()+"; ")
+		if trustedApachePort.MatchString(remainder) || trustedPHPFPMInit.MatchString(remainder) {
+			return true
+		}
+	}
 
 	switch command {
 	case "corepack enable",
