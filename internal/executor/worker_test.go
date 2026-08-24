@@ -137,3 +137,13 @@ func TestResolvedBuildEnvEntriesMergesArgsAndSecrets(t *testing.T) {
 		t.Fatalf("expected env entries %v, got %v", want, got)
 	}
 }
+
+func TestRedactBuildArgRemovesURLCredentials(t *testing.T) {
+	got := redactBuildArg("https://x-access-token:secret-value@github.com/example/private.git")
+	if strings.Contains(got, "secret-value") || strings.Contains(got, "x-access-token") {
+		t.Fatalf("credential-bearing URL was not redacted: %q", got)
+	}
+	if got != "https://REDACTED@github.com/example/private.git" {
+		t.Fatalf("unexpected redacted URL: %q", got)
+	}
+}

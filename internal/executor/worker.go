@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -681,6 +682,10 @@ func sanitizeCommandForLog(cmd *exec.Cmd) string {
 }
 
 func redactBuildArg(arg string) string {
+	if parsed, err := url.Parse(arg); err == nil && parsed.Scheme != "" && parsed.Host != "" && parsed.User != nil {
+		parsed.User = url.User("REDACTED")
+		arg = parsed.String()
+	}
 	idx := strings.Index(arg, "build-arg:")
 	if idx == -1 {
 		return arg
