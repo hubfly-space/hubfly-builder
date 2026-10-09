@@ -2,6 +2,33 @@
 
 **Hubfly Builder** Is a high-performance, standalone Go service designed to orchestrate container image builds through the Hubcell native build CLI. It provides a robust API for managing build jobs, supports automatic runtime detection, uses a built-in command allowlist for generated commands, and ensures persistence through a local SQLite database.
 
+## Windows offline inspector
+
+Windows AMD64 and ARM64 releases provide `hubfly-builder.exe` for the CLI's
+local detection and Dockerfile generation:
+
+```powershell
+hubfly-builder.exe version
+hubfly-builder.exe offline inspect --path 'C:\Projects\my app' --config hubfly.build.json
+```
+
+`offline inspect` writes JSON containing `buildConfig`, `dockerfile`,
+`buildArgKeys`, and `buildSecretKeys`. It supports automatic and manual build
+configuration, native Windows project paths, and repository-relative working
+and context directories. Generated Dockerfiles and commands target Linux
+containers.
+
+The Windows entrypoint includes only offline inspection and version reporting.
+Starting the regional server returns an error before creating configuration,
+database, logs, or workers. Image building remains with Docker in the CLI or
+the Linux Hubcell build server. Windows builds require no CGO or SQLite:
+
+```powershell
+$env:CGO_ENABLED = '0'
+go build -o hubfly-builder.exe ./cmd/hubfly-builder
+go test ./cmd/hubfly-builder ./internal/offline ./internal/autodetect ./internal/allowlist ./internal/dockerfileparams
+```
+
 ## Architecture & Features
 
 - **Built with Go:** High-performance, concurrent execution model.
@@ -423,6 +450,7 @@ The GitHub release publishes per-platform bundles:
 - `hubfly-builder_darwin_amd64.tar.gz`
 - `hubfly-builder_darwin_arm64.tar.gz`
 - `hubfly-builder_windows_amd64.zip`
+- `hubfly-builder_windows_arm64.zip`
 
 Each release asset also has a matching `.sha256` checksum file. Extracting a bundle places the `hubfly-builder` binary (or `hubfly-builder.exe` on Windows) at the archive root, alongside `README.md`.
 
