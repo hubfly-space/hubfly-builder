@@ -73,6 +73,10 @@ type SourceInfo struct {
 	CommitSha     string `json:"commitSha"`
 	Ref           string `json:"ref"`
 	WorkingDir    string `json:"workingDir"` // Subdirectory within the repo
+	// ArchiveURL and ArchiveSHA256 describe a tar.gz source (SourceType
+	// "archive"), used by AI Builder deploys from workspace snapshots.
+	ArchiveURL    string `json:"archiveUrl,omitempty"`
+	ArchiveSHA256 string `json:"archiveSha256,omitempty"`
 }
 
 func (a *SourceInfo) Value() (driver.Value, error) {
