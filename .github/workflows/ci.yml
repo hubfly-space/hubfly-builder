@@ -1,0 +1,53 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: go build -o /tmp/hubfly-builder ./cmd/hubfly-builder
+
+  windows-offline:
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test offline functionality
+        run: go test ./cmd/hubfly-builder ./internal/offline ./internal/autodetect ./internal/allowlist ./internal/dockerfileparams
+      - name: Build offline binary
+        run: go build -o hubfly-builder.exe ./cmd/hubfly-builder
+      - name: Check Windows binary boundaries
+        shell: pwsh
+        run: |
+          ./hubfly-builder.exe version
+          if ($LASTEXITCODE -ne 0) { throw 'Version command failed' }
+          $deps = go list -deps ./cmd/hubfly-builder
+          if ($deps -contains 'hubfly-builder/internal/server' -or $deps -contains 'github.com/mattn/go-sqlite3') {
+            throw 'Windows binary includes the regional server or SQLite'
+          }
+          ./hubfly-builder.exe
+          if ($LASTEXITCODE -ne 1) { throw 'Windows must reject server mode' }
+          # The nonzero exit above is expected.
+          $global:LASTEXITCODE = 0
+      - name: Cross-compile Windows ARM64
+        shell: pwsh
+        run: |
+          $env:GOARCH = 'arm64'
+          go build -o hubfly-builder-arm64.exe ./cmd/hubfly-builder
