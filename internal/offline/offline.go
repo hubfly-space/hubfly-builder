@@ -97,6 +97,17 @@ func runInspect(args []string) error {
 		return err
 	}
 
+	output, err := inspect(projectRoot, cfg)
+	if err != nil {
+		return err
+	}
+
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(output)
+}
+
+func inspect(projectRoot string, cfg configFile) (inspectOutput, error) {
 	buildArgKeys, buildSecretKeys := resolveBuildEnvKeys(cfg.Env)
 	allowed := allowlist.DefaultAllowedCommands()
 	opts := autodetect.AutoDetectOptions{
@@ -105,6 +116,7 @@ func runInspect(args []string) error {
 	}
 
 	var buildCfg autodetect.BuildConfig
+	var err error
 	mode := strings.ToLower(strings.TrimSpace(cfg.Build.Mode))
 	switch mode {
 	case "", "auto":
@@ -137,10 +149,10 @@ func runInspect(args []string) error {
 			buildSecretKeys,
 		)
 	default:
-		return fmt.Errorf("unsupported build mode %q", cfg.Build.Mode)
+		return inspectOutput{}, fmt.Errorf("unsupported build mode %q", cfg.Build.Mode)
 	}
 	if err != nil {
-		return err
+		return inspectOutput{}, err
 	}
 
 	output := inspectOutput{
@@ -165,9 +177,7 @@ func runInspect(args []string) error {
 		BuildSecretKeys: buildSecretKeys,
 	}
 
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(output)
+	return output, nil
 }
 
 func loadConfig(projectRoot, configPath string) (configFile, error) {
