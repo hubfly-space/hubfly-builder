@@ -23,6 +23,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"hubfly-builder/internal/allowlist"
+	"hubfly-builder/internal/archivesource"
 	"hubfly-builder/internal/autodetect"
 	"hubfly-builder/internal/dockerfileparams"
 	"hubfly-builder/internal/envplan"
@@ -109,6 +110,10 @@ func (s *Server) CreateJobHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(job.BuildConfig.Env) == 0 && len(job.Env) > 0 {
 		job.BuildConfig.Env = copyStringMap(job.Env)
+	}
+	if job.SourceType == "archive" {
+		http.Error(w, "archive sources are only supported by /v1/regions/{regionId}/builds", http.StatusBadRequest)
+		return
 	}
 	if err := normalizeJobSourceInfo(&job); err != nil {
 		log.Printf("ERROR: job %s invalid source info: %v", job.ID, err)
@@ -373,6 +378,13 @@ func sanitizeCommandOutput(raw string) string {
 }
 
 func normalizeJobSourceInfo(job *storage.BuildJob) error {
+	if job.SourceType == "archive" {
+		if err := archivesource.Validate(job.SourceInfo.ArchiveURL, job.SourceInfo.ArchiveSHA256, archivesource.AllowedPrefixes()); err != nil {
+			return err
+		}
+		job.SourceInfo.GitRepository, job.SourceInfo.Ref, job.SourceInfo.CommitSha = "", "", ""
+		return nil
+	}
 	repository, err := sourceguard.NormalizeGitRepository(job.SourceInfo.GitRepository)
 	if err != nil {
 		return err
@@ -626,12 +638,14 @@ func copyStringMap(values map[string]string) map[string]string {
 // ─── Gateway-compatible types ──────────────────────────────────────────────────
 
 type gatewaySubmitBuildSource struct {
-	Type       string `json:"type"`
-	Provider   string `json:"provider"`
-	Repository string `json:"repository"`
-	Ref        string `json:"ref"`
-	CommitSha  string `json:"commitSha,omitempty"`
-	WorkingDir string `json:"workingDir,omitempty"`
+	Type          string `json:"type"`
+	Provider      string `json:"provider"`
+	Repository    string `json:"repository"`
+	Ref           string `json:"ref"`
+	CommitSha     string `json:"commitSha,omitempty"`
+	WorkingDir    string `json:"workingDir,omitempty"`
+	ArchiveURL    string `json:"archiveUrl,omitempty"`
+	ArchiveSHA256 string `json:"archiveSha256,omitempty"`
 }
 
 type gatewaySubmitBuildConfig struct {
@@ -738,7 +752,8 @@ func (s *Server) CreateBuildV1Handler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": "projectNetworkName is required"})
 		return
 	}
-	if strings.TrimSpace(input.Source.Repository) == "" {
+	isArchive := input.Source.Type == "archive"
+	if !isArchive && strings.TrimSpace(input.Source.Repository) == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "BAD_REQUEST", "message": "source.repository is required"})
@@ -752,16 +767,22 @@ func (s *Server) CreateBuildV1Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sourceType := "git"
+	if isArchive {
+		sourceType = "archive"
+	}
 	job := &storage.BuildJob{
 		ID:         input.BuildID,
 		ProjectID:  input.ProjectID,
 		UserID:     input.UserID,
-		SourceType: "git",
+		SourceType: sourceType,
 		SourceInfo: storage.SourceInfo{
 			GitRepository: input.Source.Repository,
 			CommitSha:     input.Source.CommitSha,
 			Ref:           input.Source.Ref,
 			WorkingDir:    input.Source.WorkingDir,
+			ArchiveURL:    input.Source.ArchiveURL,
+			ArchiveSHA256: input.Source.ArchiveSHA256,
 		},
 		BuildConfig: storage.BuildConfig{
 			IsAutoBuild:        input.Build.IsAutoBuild,
