@@ -7,7 +7,7 @@ DEPLOY_SERVERS ?= root@100.66.212.61 root@100.66.229.114
 all: build
 
 build:
-	go build -o $(BINARY_NAME) ./cmd/hubfly-builder/main.go
+	go build -o $(BINARY_NAME) ./cmd/hubfly-builder
 
 test:
 	go test -v ./...
@@ -27,7 +27,7 @@ sec-scan:
 	govulncheck ./...
 
 build-linux:
-	GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME)-linux ./cmd/hubfly-builder/main.go
+	GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME)-linux ./cmd/hubfly-builder
 
 deploy:
 	DEPLOY_SERVERS="$(DEPLOY_SERVERS)" BINARY_NAME="$(BINARY_NAME)" bash scripts/deploy.sh
