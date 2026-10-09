@@ -19,6 +19,7 @@ import (
 
 	"hubfly-builder/internal/allowlist"
 	"hubfly-builder/internal/api"
+	"hubfly-builder/internal/archivesource"
 	"hubfly-builder/internal/autodetect"
 	"hubfly-builder/internal/dockerfileparams"
 	"hubfly-builder/internal/driver"
@@ -105,57 +106,66 @@ func (w *Worker) Run() error {
 		w.log("ERROR: invalid source info: %v", err)
 		return w.failJob("invalid source info")
 	}
-	cloneCmd := w.execCommand("git", "clone", "--", w.job.SourceInfo.GitRepository, w.workDir)
-	if err := w.executeCommand(cloneCmd); err != nil {
-		w.log("ERROR: failed to clone repository: %v", err)
-		return w.failForStep(err, "failed to clone repository")
-	}
+	if w.job.SourceType == "archive" {
+		w.log("Downloading project archive (sha256 %s)", w.job.SourceInfo.ArchiveSHA256)
+		if err := archivesource.Fetch(w.ctx, w.job.SourceInfo.ArchiveURL, w.job.SourceInfo.ArchiveSHA256, w.workDir); err != nil {
+			w.log("ERROR: failed to fetch project archive: %v", err)
+			return w.failJob("failed to fetch project archive")
+		}
+		w.log("Project archive extracted successfully.")
+	} else {
+		cloneCmd := w.execCommand("git", "clone", "--", w.job.SourceInfo.GitRepository, w.workDir)
+		if err := w.executeCommand(cloneCmd); err != nil {
+			w.log("ERROR: failed to clone repository: %v", err)
+			return w.failForStep(err, "failed to clone repository")
+		}
 
-	var defaultBranch string
-	if w.job.SourceInfo.Ref == "" && w.job.SourceInfo.CommitSha == "" {
-		branchName, err := w.commandOutput(w.execCommand("git", "-C", w.workDir, "rev-parse", "--abbrev-ref", "HEAD"))
-		if err == nil && branchName != "" && branchName != "HEAD" {
-			defaultBranch = branchName
-			w.log("Detected default branch: %s", defaultBranch)
+		var defaultBranch string
+		if w.job.SourceInfo.Ref == "" && w.job.SourceInfo.CommitSha == "" {
+			branchName, err := w.commandOutput(w.execCommand("git", "-C", w.workDir, "rev-parse", "--abbrev-ref", "HEAD"))
+			if err == nil && branchName != "" && branchName != "HEAD" {
+				defaultBranch = branchName
+				w.log("Detected default branch: %s", defaultBranch)
+			}
+			w.log("No ref or commit specified; syncing to latest default branch HEAD")
+			if err := w.executeCommand(w.execCommand("git", "-C", w.workDir, "fetch", "--prune", "origin")); err != nil {
+				w.log("ERROR: failed to fetch latest commits: %v", err)
+				return w.failForStep(err, "failed to fetch latest commits")
+			}
+			resetTarget := "origin/HEAD"
+			if defaultBranch != "" {
+				resetTarget = "origin/" + defaultBranch
+			}
+			if err := w.executeCommand(w.execCommand("git", "-C", w.workDir, "reset", "--hard", resetTarget)); err != nil {
+				w.log("ERROR: failed to reset to %s: %v", resetTarget, err)
+				return w.failForStep(err, "failed to reset to latest commit")
+			}
 		}
-		w.log("No ref or commit specified; syncing to latest default branch HEAD")
-		if err := w.executeCommand(w.execCommand("git", "-C", w.workDir, "fetch", "--prune", "origin")); err != nil {
-			w.log("ERROR: failed to fetch latest commits: %v", err)
-			return w.failForStep(err, "failed to fetch latest commits")
-		}
-		resetTarget := "origin/HEAD"
-		if defaultBranch != "" {
-			resetTarget = "origin/" + defaultBranch
-		}
-		if err := w.executeCommand(w.execCommand("git", "-C", w.workDir, "reset", "--hard", resetTarget)); err != nil {
-			w.log("ERROR: failed to reset to %s: %v", resetTarget, err)
-			return w.failForStep(err, "failed to reset to latest commit")
-		}
-	}
 
-	if w.job.SourceInfo.Ref != "" {
-		w.log("Checking out ref: %s", w.job.SourceInfo.Ref)
-		checkoutRefCmd := w.execCommand("git", "-C", w.workDir, "checkout", w.job.SourceInfo.Ref)
-		if err := w.executeCommand(checkoutRefCmd); err != nil {
-			w.log("ERROR: failed to checkout ref %s: %v", w.job.SourceInfo.Ref, err)
-			return w.failForStep(err, "failed to checkout ref")
+		if w.job.SourceInfo.Ref != "" {
+			w.log("Checking out ref: %s", w.job.SourceInfo.Ref)
+			checkoutRefCmd := w.execCommand("git", "-C", w.workDir, "checkout", w.job.SourceInfo.Ref)
+			if err := w.executeCommand(checkoutRefCmd); err != nil {
+				w.log("ERROR: failed to checkout ref %s: %v", w.job.SourceInfo.Ref, err)
+				return w.failForStep(err, "failed to checkout ref")
+			}
 		}
-	}
 
-	if w.job.SourceInfo.CommitSha != "" {
-		w.log("Checking out commit SHA: %s", w.job.SourceInfo.CommitSha)
-		checkoutShaCmd := w.execCommand("git", "-C", w.workDir, "checkout", w.job.SourceInfo.CommitSha)
-		if err := w.executeCommand(checkoutShaCmd); err != nil {
-			w.log("ERROR: failed to checkout commit %s: %v", w.job.SourceInfo.CommitSha, err)
-			return w.failForStep(err, "failed to checkout commit")
+		if w.job.SourceInfo.CommitSha != "" {
+			w.log("Checking out commit SHA: %s", w.job.SourceInfo.CommitSha)
+			checkoutShaCmd := w.execCommand("git", "-C", w.workDir, "checkout", w.job.SourceInfo.CommitSha)
+			if err := w.executeCommand(checkoutShaCmd); err != nil {
+				w.log("ERROR: failed to checkout commit %s: %v", w.job.SourceInfo.CommitSha, err)
+				return w.failForStep(err, "failed to checkout commit")
+			}
 		}
-	}
 
-	if commitSHA, err := w.commandOutput(w.execCommand("git", "-C", w.workDir, "rev-parse", "HEAD")); err == nil && commitSHA != "" {
-		w.log("Checked out commit SHA: %s", commitSHA)
-	}
+		if commitSHA, err := w.commandOutput(w.execCommand("git", "-C", w.workDir, "rev-parse", "HEAD")); err == nil && commitSHA != "" {
+			w.log("Checked out commit SHA: %s", commitSHA)
+		}
 
-	w.log("Repository cloned and checked out successfully.")
+		w.log("Repository cloned and checked out successfully.")
+	}
 
 	appDir, appPath, err := resolveWorkspacePath(w.workDir, w.job.SourceInfo.WorkingDir)
 	if err != nil {
@@ -645,6 +655,9 @@ func (w *Worker) generateImageTag() string {
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	shortSha := sanitizeImageTagComponent(w.job.SourceInfo.CommitSha)
 	if shortSha == "" {
+		shortSha = sanitizeImageTagComponent(w.job.SourceInfo.ArchiveSHA256)
+	}
+	if shortSha == "" {
 		shortSha = sanitizeImageTagComponent(w.job.SourceInfo.Ref)
 	}
 	if shortSha == "" {
@@ -758,6 +771,9 @@ func hubcellCLIPathFromEnv() string {
 }
 
 func (w *Worker) normalizeSourceInfo() error {
+	if w.job.SourceType == "archive" {
+		return archivesource.Validate(w.job.SourceInfo.ArchiveURL, w.job.SourceInfo.ArchiveSHA256, archivesource.AllowedPrefixes())
+	}
 	repository, err := sourceguard.NormalizeGitRepository(w.job.SourceInfo.GitRepository)
 	if err != nil {
 		return err
