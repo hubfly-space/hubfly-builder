@@ -41,7 +41,7 @@ build_for_arch() {
   if [[ ! -x "${out}" ]]; then
     mkdir -p dist/deploy
     echo "Building ${BINARY_NAME} for linux/${arch}..." >&2
-    CGO_ENABLED=1 GOOS=linux GOARCH="${arch}" go build -o "${out}" ./cmd/hubfly-builder/main.go
+    CGO_ENABLED=1 GOOS=linux GOARCH="${arch}" go build -o "${out}" ./cmd/hubfly-builder
     chmod +x "${out}"
   fi
   printf '%s' "${out}"
