@@ -155,3 +155,43 @@ func TestReportResultIncludesAuthHeaders(t *testing.T) {
 		t.Fatal("timed out waiting for callback")
 	}
 }
+
+func TestReportResultIncludesStaticExposePort(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  storage.BuildConfig
+		want string
+	}{
+		{"static default", storage.BuildConfig{Runtime: "static"}, "8080"},
+		{"static explicit", storage.BuildConfig{Runtime: "static", ExposePort: "9000"}, "9000"},
+		{"node omitted", storage.BuildConfig{Runtime: "node", ExposePort: "3000"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payloadCh := make(chan map[string]any, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				payloadCh <- payload
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			job := &storage.BuildJob{ID: "job-1", BuildConfig: tc.cfg}
+			if err := NewClient(server.URL, "").ReportResult(job, "success", ""); err != nil {
+				t.Fatalf("ReportResult returned error: %v", err)
+			}
+			payload := <-payloadCh
+			got, present := payload["exposePort"]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("exposePort should be omitted, got %v", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("exposePort = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}
