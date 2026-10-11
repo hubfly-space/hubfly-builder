@@ -37,18 +37,21 @@ func NewClient(callbackURL, callbackSecret string) *Client {
 }
 
 type runtimeBuildInspection struct {
-	BuildID       string  `json:"buildId"`
-	Status        string  `json:"status"`
-	ImageTag      string  `json:"imageTag,omitempty"`
-	CommitSha     string  `json:"commitSha,omitempty"`
-	Ref           string  `json:"ref,omitempty"`
-	StartedAt     string  `json:"startedAt,omitempty"`
-	FinishedAt    string  `json:"finishedAt,omitempty"`
-	DurationMs    *int64  `json:"durationMs,omitempty"`
-	Error         string  `json:"error,omitempty"`
-	ExitCode      *int64  `json:"exitCode,omitempty"`
-	ArtifactURL   string  `json:"artifactUrl,omitempty"`
+	BuildID        string `json:"buildId"`
+	Status         string `json:"status"`
+	ImageTag       string `json:"imageTag,omitempty"`
+	CommitSha      string `json:"commitSha,omitempty"`
+	Ref            string `json:"ref,omitempty"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	FinishedAt     string `json:"finishedAt,omitempty"`
+	DurationMs     *int64 `json:"durationMs,omitempty"`
+	Error          string `json:"error,omitempty"`
+	ExitCode       *int64 `json:"exitCode,omitempty"`
+	ArtifactURL    string `json:"artifactUrl,omitempty"`
 	BuilderVersion string `json:"builderVersion,omitempty"`
+	// ExposePort is set only for static sites: the builder serves them with
+	// nginx on its own port, which the deployment must route to.
+	ExposePort string `json:"exposePort,omitempty"`
 }
 
 var builderStatusToGateway = map[string]string{
@@ -97,12 +100,13 @@ func (c *Client) ReportResult(job *storage.BuildJob, status, errorMsg string) er
 	status = mapStatus(status)
 
 	inspection := runtimeBuildInspection{
-		BuildID:  job.ID,
-		Status:   status,
-		ImageTag: job.ImageTag,
-		CommitSha: job.SourceInfo.CommitSha,
-		Ref:      job.SourceInfo.Ref,
-		Error:    errorMsg,
+		BuildID:    job.ID,
+		Status:     status,
+		ImageTag:   job.ImageTag,
+		CommitSha:  job.SourceInfo.CommitSha,
+		Ref:        job.SourceInfo.Ref,
+		Error:      errorMsg,
+		ExposePort: callbackExposePort(job.BuildConfig),
 	}
 	if !job.StartedAt.Time.IsZero() {
 		inspection.StartedAt = job.StartedAt.Time.Format(time.RFC3339)
