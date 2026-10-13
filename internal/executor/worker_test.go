@@ -95,17 +95,17 @@ func TestGenerateImageTagUsesRefFallbackWhenCommitMissing(t *testing.T) {
 	}
 }
 
-func TestHubcellBuildPathUsesDotForRootDockerfile(t *testing.T) {
-	got := hubcellBuildPath("/tmp/repo", "/tmp/repo/Dockerfile")
+func TestHubcellBuildPathUsesDotForRootContext(t *testing.T) {
+	got := hubcellBuildPath("/tmp/repo", "/tmp/repo")
 	if got != "." {
-		t.Fatalf("expected root Dockerfile path to use '.', got %q", got)
+		t.Fatalf("expected root context to use '.', got %q", got)
 	}
 }
 
-func TestHubcellBuildPathUsesDirectoryForNestedDockerfile(t *testing.T) {
-	got := hubcellBuildPath("/tmp/repo", "/tmp/repo/apps/web/Dockerfile")
+func TestHubcellBuildPathPreservesNestedContext(t *testing.T) {
+	got := hubcellBuildPath("/tmp/repo", "/tmp/repo/apps/web")
 	if got != "/tmp/repo/apps/web" {
-		t.Fatalf("expected nested Dockerfile directory, got %q", got)
+		t.Fatalf("expected nested context directory, got %q", got)
 	}
 }
 
