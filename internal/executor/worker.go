@@ -323,15 +323,16 @@ func (w *Worker) Run() error {
 		imageTag := w.generateImageTag()
 		w.log("Image tag: %s", imageTag)
 		opts := driver.HubcellBuildOpts{
-			HubcellPath: hubcellCLIPathFromEnv(),
-			WorkDir:     w.workDir,
-			ContextPath: hubcellBuildPath(w.workDir, dockerfilePath),
-			ImageTag:    imageTag,
-			Envs:        buildEnvEntries,
-			Network:     requestedNetwork,
-			MemoryBytes: memoryMBToBytes(memLimit),
-			CPUPeriod:   defaultHubcellCPUPeriod,
-			CPUQuota:    cpuToQuota(cpuLimit, defaultHubcellCPUPeriod),
+			HubcellPath:    hubcellCLIPathFromEnv(),
+			WorkDir:        w.workDir,
+			ContextPath:    hubcellBuildPath(w.workDir, buildContext),
+			DockerfilePath: dockerfilePath,
+			ImageTag:       imageTag,
+			Envs:           buildEnvEntries,
+			Network:        requestedNetwork,
+			MemoryBytes:    memoryMBToBytes(memLimit),
+			CPUPeriod:      defaultHubcellCPUPeriod,
+			CPUQuota:       cpuToQuota(cpuLimit, defaultHubcellCPUPeriod),
 		}
 		applyDefaultHubcellRootfs(&opts)
 		if err := w.buildImageWithHubcell(opts); err != nil {
@@ -419,15 +420,16 @@ func (w *Worker) Run() error {
 		w.log("Image tag: %s", imageTag)
 
 		opts := driver.HubcellBuildOpts{
-			HubcellPath: hubcellCLIPathFromEnv(),
-			WorkDir:     w.workDir,
-			ContextPath: hubcellBuildPath(w.workDir, dockerfilePath),
-			ImageTag:    imageTag,
-			Envs:        buildEnvEntries,
-			Network:     requestedNetwork,
-			MemoryBytes: memoryMBToBytes(memLimit),
-			CPUPeriod:   defaultHubcellCPUPeriod,
-			CPUQuota:    cpuToQuota(cpuLimit, defaultHubcellCPUPeriod),
+			HubcellPath:    hubcellCLIPathFromEnv(),
+			WorkDir:        w.workDir,
+			ContextPath:    hubcellBuildPath(w.workDir, buildContext),
+			DockerfilePath: dockerfilePath,
+			ImageTag:       imageTag,
+			Envs:           buildEnvEntries,
+			Network:        requestedNetwork,
+			MemoryBytes:    memoryMBToBytes(memLimit),
+			CPUPeriod:      defaultHubcellCPUPeriod,
+			CPUQuota:       cpuToQuota(cpuLimit, defaultHubcellCPUPeriod),
 		}
 		applyDefaultHubcellRootfs(&opts)
 		if err := w.buildImageWithHubcell(opts); err != nil {
@@ -592,13 +594,13 @@ func applyDefaultHubcellRootfs(opts *driver.HubcellBuildOpts) {
 	}
 }
 
-func hubcellBuildPath(repoRoot, dockerfilePath string) string {
-	dockerfileDir := filepath.Clean(filepath.Dir(dockerfilePath))
+func hubcellBuildPath(repoRoot, contextDir string) string {
+	contextDir = filepath.Clean(contextDir)
 	repoRoot = filepath.Clean(repoRoot)
-	if dockerfileDir == repoRoot {
+	if contextDir == repoRoot {
 		return "."
 	}
-	return dockerfileDir
+	return contextDir
 }
 
 func memoryMBToBytes(memoryMB int) int64 {
