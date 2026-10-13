@@ -14,6 +14,7 @@ type HubcellBuildOpts struct {
 	HubcellPath       string
 	WorkDir           string
 	ContextPath       string
+	DockerfilePath    string
 	ImageTag          string
 	Envs              []string
 	Network           string
@@ -32,6 +33,9 @@ func HubcellBuildCommandContext(ctx context.Context, opts HubcellBuildOpts) *exe
 	args := []string{hubcellPath, "build", "--verbose"}
 
 	args = append(args, "-t", opts.ImageTag)
+	if dockerfile := strings.TrimSpace(opts.DockerfilePath); dockerfile != "" {
+		args = append(args, "-f", dockerfile)
+	}
 
 	for _, envEntry := range opts.Envs {
 		envEntry = strings.TrimSpace(envEntry)
