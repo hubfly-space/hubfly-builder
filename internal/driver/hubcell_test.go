@@ -11,6 +11,7 @@ func TestHubcellBuildCommandUsesSudoAndResourceFlags(t *testing.T) {
 		HubcellPath:       hubcellDir,
 		WorkDir:           "/tmp/repo",
 		ContextPath:       "/tmp/context",
+		DockerfilePath:    "/tmp/context/deploy/Dockerfile",
 		ImageTag:          "hubcell.local/user/project:tag",
 		Envs:              []string{`APP_ENV="production"`, `DATABASE_URL="postgres://db/app"`},
 		Network:           "project-net",
@@ -28,6 +29,7 @@ func TestHubcellBuildCommandUsesSudoAndResourceFlags(t *testing.T) {
 		"sudo " + hubcellDir + "/hubcell build",
 		"--verbose",
 		"-t hubcell.local/user/project:tag",
+		"-f /tmp/context/deploy/Dockerfile",
 		`-e APP_ENV="production"`,
 		`-e DATABASE_URL="postgres://db/app"`,
 		"--network project-net",
@@ -40,6 +42,9 @@ func TestHubcellBuildCommandUsesSudoAndResourceFlags(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected %q in command, got %q", want, got)
 		}
+	}
+	if cmd.Args[len(cmd.Args)-1] != "/tmp/context" {
+		t.Fatalf("expected repository context rather than Dockerfile directory, got %q", cmd.Args)
 	}
 
 	for _, forbidden := range []string{"--cap-add", "--allow-unsafe-build-isolation", "KILL", "NET_BIND_SERVICE", "SETFCAP", "SYS_CHROOT", "SYS_ADMIN", "rootfs-virtual-size", "rootfs-grow-step", " /tmp/context/Dockerfile"} {
