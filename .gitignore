@@ -11,3 +11,4 @@ temp_interactive_push.bat
 .localdata
 
 dist
+dist/deploy/hubfly-builder-linux-amd64
